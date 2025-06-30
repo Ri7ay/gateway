@@ -673,7 +673,8 @@ func buildZonalLocalities(metadata *corev3.Metadata, ds *ir.DestinationSetting) 
 			Metadata: metadata,
 			HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
 				Endpoint: &endpointv3.Endpoint{
-					Address: buildAddress(irEp),
+					Hostname: irEp.Hostname,
+					Address:  buildAddress(irEp),
 				},
 			},
 			LoadBalancingWeight: wrapperspb.UInt32(1),
@@ -715,7 +716,8 @@ func buildWeightedLocalities(metadata *corev3.Metadata, ds *ir.DestinationSettin
 			Metadata: metadata,
 			HostIdentifier: &endpointv3.LbEndpoint_Endpoint{
 				Endpoint: &endpointv3.Endpoint{
-					Address: buildAddress(irEp),
+					Hostname: irEp.Hostname,
+					Address:  buildAddress(irEp),
 				},
 			},
 			HealthStatus: healthStatus,

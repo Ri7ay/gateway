@@ -22,6 +22,8 @@ import (
 )
 
 func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
+	hostmame := "www.gateway-test.com"
+
 	tests := []struct {
 		name              string
 		endpointSlices    []*discoveryv1.EndpointSlice
@@ -54,6 +56,19 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
 					},
 				},
+				{
+					ObjectMeta:  metav1.ObjectMeta{Name: "slice3"},
+					AddressType: discoveryv1.AddressTypeIPv6,
+					Endpoints: []discoveryv1.Endpoint{
+						{
+							Hostname:  &hostmame,
+							Addresses: []string{"192.0.2.3"},
+						},
+					},
+					Ports: []discoveryv1.EndpointPort{
+						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+					},
+				},
 			},
 			portName:     "http",
 			portProtocol: corev1.ProtocolTCP,
@@ -61,6 +76,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 				{Host: "192.0.2.1", Port: 80, Draining: false},
 				{Host: "192.0.2.2", Port: 80, Draining: false},
 				{Host: "2001:db8::1", Port: 80, Draining: false},
+				{Hostname: hostmame, Host: "192.0.2.3", Port: 80, Draining: false},
 			},
 			expectedAddrType: ir.IP,
 		},
@@ -81,7 +97,10 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 					ObjectMeta:  metav1.ObjectMeta{Name: "slice2"},
 					AddressType: discoveryv1.AddressTypeFQDN,
 					Endpoints: []discoveryv1.Endpoint{
-						{Addresses: []string{"example.com"}},
+						{
+							Hostname:  &hostmame,
+							Addresses: []string{"example.com"},
+						},
 					},
 					Ports: []discoveryv1.EndpointPort{
 						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
@@ -92,7 +111,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 			portProtocol: corev1.ProtocolTCP,
 			expectedEndpoints: []*ir.DestinationEndpoint{
 				{Host: "192.0.2.1", Port: 80, Draining: false},
-				{Host: "example.com", Port: 80, Draining: false},
+				{Hostname: hostmame, Host: "example.com", Port: 80, Draining: false},
 			},
 			expectedAddrType: ir.MIXED,
 		},
@@ -217,6 +236,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 			fmt.Println("Actual endpoints:")
 			for i, endpoint := range endpoints {
 				fmt.Printf("  Endpoint %d:\n", i+1)
+				fmt.Printf("    Hostmame: %s\n", endpoint.Hostname)
 				fmt.Printf("    Address: %s\n", endpoint.Host)
 				fmt.Printf("    Port: %d\n", endpoint.Port)
 				fmt.Printf("    Draining: %t\n", endpoint.Draining)

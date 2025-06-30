@@ -845,7 +845,7 @@ func destinationSettingFromHostAndPort(name, host string, port uint32) []*ir.Des
 			Name:      name,
 			Weight:    ptr.To[uint32](1),
 			Protocol:  ir.GRPC,
-			Endpoints: []*ir.DestinationEndpoint{ir.NewDestEndpoint(host, port, false, nil)},
+			Endpoints: []*ir.DestinationEndpoint{ir.NewDestEndpoint("", host, port, false, nil)},
 		},
 	}
 }

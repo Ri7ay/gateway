@@ -76,6 +76,29 @@ func validateBackend(backend *egv1a1.Backend) status.Error {
 	}
 
 	for _, ep := range backend.Spec.Endpoints {
+		if ep.Hostname != nil {
+			hostname := ep.FQDN.Hostname
+			// must be a valid hostname
+			if errs := validation.IsDNS1123Subdomain(hostname); errs != nil {
+				return status.NewRouteStatusError(
+					fmt.Errorf("hostname %s is not a valid endpoint hostname", hostname),
+					status.RouteReasonInvalidAddress,
+				)
+			}
+			if len(strings.Split(hostname, ".")) < 2 {
+				return status.NewRouteStatusError(
+					fmt.Errorf("hostname %s should be a domain with at least two segments separated by dots", hostname),
+					status.RouteReasonInvalidAddress,
+				)
+			}
+			// IP addresses are not allowed so parsing the hostname as an address needs to fail
+			if _, err := netip.ParseAddr(hostname); err == nil {
+				return status.NewRouteStatusError(
+					fmt.Errorf("hostname %s is an IP address", hostname),
+					status.RouteReasonInvalidAddress,
+				)
+			}
+		}
 		if ep.FQDN != nil {
 			hostname := ep.FQDN.Hostname
 			// must be a valid hostname
