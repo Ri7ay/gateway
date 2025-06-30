@@ -1805,11 +1805,7 @@ func getIREndpointsFromEndpointSlices(endpointSlices []*discoveryv1.EndpointSlic
 func getIREndpointsFromEndpointSlice(endpointSlice *discoveryv1.EndpointSlice, portName string, portProtocol corev1.Protocol) []*ir.DestinationEndpoint {
 	var endpoints []*ir.DestinationEndpoint
 	for _, endpoint := range endpointSlice.Endpoints {
-		hostname := ""
-		if endpoint.Hostname != nil {
-			hostname = *endpoint.Hostname
-		}
-
+		hostname := ptr.Deref(endpoint.Hostname, "")
 		for _, endpointPort := range endpointSlice.Ports {
 			// Check if the endpoint port matches the service port
 			if *endpointPort.Name != portName || *endpointPort.Protocol != portProtocol {
@@ -1923,12 +1919,10 @@ func (t *Translator) processBackendDestinationSetting(
 	}
 
 	for _, bep := range backend.Spec.Endpoints {
-		hostname := ""
-		if bep.Hostname != nil {
-			hostname = *bep.Hostname
-		}
-
-		var irde *ir.DestinationEndpoint
+		var (
+			irde     *ir.DestinationEndpoint
+			hostname = ptr.Deref(bep.Hostname, "")
+		)
 		switch {
 		case bep.IP != nil:
 			ip := net.ParseIP(bep.IP.Address)
