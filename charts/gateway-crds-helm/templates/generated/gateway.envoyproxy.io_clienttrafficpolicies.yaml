@@ -154,13 +154,12 @@ spec:
                     - value
                     type: object
                   maxAcceptPerSocketEvent:
+                    default: 1
                     description: |-
                       MaxAcceptPerSocketEvent provides configuration for the maximum number of connections to accept from the kernel
                       per socket event. If there are more than MaxAcceptPerSocketEvent connections pending accept, connections over
-                      this threshold will be accepted in later event loop iterations. If no value is provided Envoy will accept
-                      all connections pending accept from the kernel.
-                      It is recommended to lower this value for better overload management and reduced per-event cost.
-                      Setting it to 1 is a viable option with no noticeable impact on performance.
+                      this threshold will be accepted in later event loop iterations.
+                      Defaults to 1 and can be disabled by setting to 0 for allowing unlimited accepted connections.
                     format: int32
                     type: integer
                   socketBufferLimit:
@@ -725,6 +724,12 @@ spec:
                         description: |-
                           RequestReceivedTimeout is the duration envoy waits for the complete request reception. This timer starts upon request
                           initiation and stops when either the last byte of the request is sent upstream or when the response begins.
+                        pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
+                        type: string
+                      streamIdleTimeout:
+                        description: |2-
+                           The stream idle timeout defines the amount of time a stream can exist without any upstream or downstream activity.
+                           Default: 5 minutes.
                         pattern: ^([0-9]{1,5}(h|m|s|ms)){1,4}$
                         type: string
                     type: object
