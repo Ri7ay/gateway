@@ -2,7 +2,6 @@ gateways:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: Gateway
   metadata:
-    creationTimestamp: null
     name: gateway-1
     namespace: envoy-gateway
   spec:
@@ -17,9 +16,7 @@ gateways:
       protocol: TLS
       tls:
         certificateRefs:
-        - group: null
-          kind: null
-          name: tls-secret-1
+        - name: tls-secret-1
         mode: Passthrough
   status:
     listeners:
@@ -55,7 +52,6 @@ tlsRoutes:
 - apiVersion: gateway.networking.k8s.io/v1alpha2
   kind: TLSRoute
   metadata:
-    creationTimestamp: null
     name: tlsroute-1
     namespace: default
   spec:
@@ -70,9 +66,9 @@ tlsRoutes:
     parents:
     - conditions:
       - lastTransitionTime: null
-        message: There are no ready listeners for this parent ref
-        reason: NoReadyListeners
-        status: "False"
+        message: Route is accepted
+        reason: Accepted
+        status: "True"
         type: Accepted
       - lastTransitionTime: null
         message: Resolved all the Object references for the Route
@@ -88,6 +84,27 @@ xdsIR:
     accessLog:
       json:
       - path: /dev/stdout
+    globalResources:
+      proxyServiceCluster:
+        metadata:
+          kind: Service
+          name: envoy-envoy-gateway-gateway-1-196ae069
+          namespace: envoy-gateway-system
+          sectionName: "8080"
+        name: envoy-gateway/gateway-1
+        settings:
+        - addressType: IP
+          endpoints:
+          - host: 7.6.5.4
+            port: 8080
+            zone: zone1
+          metadata:
+            kind: Service
+            name: envoy-envoy-gateway-gateway-1-196ae069
+            namespace: envoy-gateway-system
+            sectionName: "8080"
+          name: envoy-gateway/gateway-1
+          protocol: TCP
     readyListener:
       address: 0.0.0.0
       ipFamily: IPv4

@@ -4,7 +4,6 @@ metadata:
   annotations:
     anno1: value1
     anno2: value2
-  creationTimestamp: null
   labels:
     app.kubernetes.io/component: proxy
     app.kubernetes.io/managed-by: envoy-gateway
@@ -36,7 +35,6 @@ spec:
         prometheus.io/path: /stats/prometheus
         prometheus.io/port: "19001"
         prometheus.io/scrape: "true"
-      creationTimestamp: null
       labels:
         app.kubernetes.io/component: proxy
         app.kubernetes.io/managed-by: envoy-gateway
@@ -49,10 +47,13 @@ spec:
       automountServiceAccountToken: false
       containers:
       - args:
-        - --service-cluster default
-        - --service-node $(ENVOY_POD_NAME)
+        - --service-cluster
+        - default
+        - --service-node
+        - $(ENVOY_POD_NAME)
+        - --config-yaml
         - |
-          --config-yaml admin:
+          admin:
             access_log:
             - name: envoy.access_loggers.file
               typed_config:
@@ -63,10 +64,23 @@ spec:
                 address: 127.0.0.1
                 port_value: 19000
           cluster_manager:
-            local_cluster_name: local_cluster
+            local_cluster_name: default
           node:
             locality:
               zone: $(ENVOY_SERVICE_ZONE)
+          deferredStatOptions:
+            enableDeferredCreationStats: true
+          stats_config:
+            use_all_default_tags: true
+            stats_tags:
+            - regex: \.zone(\.(([^\.]+)\.))
+              tag_name: from_zone
+            - regex: \.zone\.[^\.]+\.(([^\.]+)\.)
+              tag_name: to_zone
+            - regex: "^cluster(\\..+\\.(.+))\\.total_match_count$"
+              tag_name: socket_match_name
+            - regex: "circuit_breakers\\.((.+?)\\.).+"
+              tag_name: priority
           layered_runtime:
             layers:
             - name: global_config
@@ -84,9 +98,11 @@ spec:
               set_node_on_first_message_only: true
             lds_config:
               ads: {}
+              initial_fetch_timeout: 0s
               resource_api_version: V3
             cds_config:
               ads: {}
+              initial_fetch_timeout: 0s
               resource_api_version: V3
           static_resources:
             listeners:
@@ -138,22 +154,22 @@ spec:
                           address: 127.0.0.1
                           port_value: 19000
             - connect_timeout: 10s
-              lb_policy: ROUND_ROBIN
-              load_assignment:
-                cluster_name: local_cluster
-                endpoints:
-                - lb_endpoints:
-                  - endpoint:
-                      address:
-                        socket_address:
-                          address: 127.0.0.1
-                          port_value: 10080
-                    load_balancing_weight: 1
-                  load_balancing_weight: 1
-                  locality:
-                    zone: $(ENVOY_SERVICE_ZONE)
-              name: local_cluster
-              type: STATIC
+              eds_cluster_config:
+                eds_config:
+                  ads: {}
+                  resource_api_version: 'V3'
+                service_name: default
+              load_balancing_policy:
+                policies:
+                - typed_extension_config:
+                    name: 'envoy.load_balancing_policies.least_request'
+                    typed_config:
+                      '@type': 'type.googleapis.com/envoy.extensions.load_balancing_policies.least_request.v3.LeastRequest'
+                      locality_lb_config:
+                        zone_aware_lb_config:
+                          min_cluster_size: '1'
+              name: default
+              type: EDS
             - connect_timeout: 10s
               load_assignment:
                 cluster_name: xds_cluster
@@ -164,7 +180,7 @@ spec:
                     endpoint:
                       address:
                         socket_address:
-                          address: envoy-gateway.envoy-gateway-system.svc.cluster.local
+                          address: envoy-gateway.envoy-gateway-system.svc.cluster.local.
                           port_value: 18000
               typed_extension_protocol_options:
                 envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
@@ -202,11 +218,15 @@ spec:
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
                 max_active_downstream_connections: 50000
-        - --log-level warn
+        - --log-level
+        - warn
         - --cpuset-threads
-        - --drain-strategy immediate
-        - --component-log-level misc:error
-        - --drain-time-s 60
+        - --drain-strategy
+        - immediate
+        - --component-log-level
+        - misc:error
+        - --drain-time-s
+        - "60"
         command:
         - envoy
         env:

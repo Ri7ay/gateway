@@ -15,17 +15,13 @@ package status
 
 import (
 	"errors"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	utilclock "k8s.io/utils/clock"
-	fakeclock "k8s.io/utils/clock/testing"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
-
-var clock utilclock.Clock = utilclock.RealClock{}
 
 func TestConditionChanged(t *testing.T) {
 	testCases := []struct {
@@ -87,24 +83,13 @@ func TestConditionChanged(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		if got := conditionChanged(tc.a, tc.b); got != tc.expected {
+		if got := conditionChanged(&tc.a, &tc.b); got != tc.expected {
 			assert.Equal(t, tc.expected, got, tc.name)
 		}
 	}
 }
 
 func TestMergeConditions(t *testing.T) {
-	// Inject a fake clock and don't forget to reset it
-	fakeClock := fakeclock.NewFakeClock(time.Time{})
-	clock = fakeClock
-	defer func() {
-		clock = utilclock.RealClock{}
-	}()
-
-	start := fakeClock.Now()
-	middle := start.Add(1 * time.Minute)
-	later := start.Add(2 * time.Minute)
-
 	gen := int64(1)
 
 	testCases := []struct {
@@ -116,72 +101,82 @@ func TestMergeConditions(t *testing.T) {
 		{
 			name: "status updated",
 			current: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", start, gen),
+				newCondition("available", "false", "Reason", "Message", gen),
 			},
 			updates: []metav1.Condition{
-				newCondition("available", "true", "Reason", "Message", middle, gen),
+				newCondition("available", "true", "Reason", "Message", gen),
 			},
 			expected: []metav1.Condition{
-				newCondition("available", "true", "Reason", "Message", middle, gen),
+				newCondition("available", "true", "Reason", "Message", gen),
 			},
 		},
 		{
 			name: "reason updated",
 			current: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", start, gen),
+				newCondition("available", "false", "Reason", "Message", gen),
 			},
 			updates: []metav1.Condition{
-				newCondition("available", "false", "New Reason", "Message", middle, gen),
+				newCondition("available", "false", "New Reason", "Message", gen),
 			},
 			expected: []metav1.Condition{
-				newCondition("available", "false", "New Reason", "Message", middle, gen),
+				newCondition("available", "false", "New Reason", "Message", gen),
 			},
 		},
 		{
 			name: "message updated",
 			current: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", start, gen),
+				newCondition("available", "false", "Reason", "Message", gen),
 			},
 			updates: []metav1.Condition{
-				newCondition("available", "false", "Reason", "New Message", middle, gen),
+				newCondition("available", "false", "Reason", "New Message", gen),
 			},
 			expected: []metav1.Condition{
-				newCondition("available", "false", "Reason", "New Message", middle, gen),
+				newCondition("available", "false", "Reason", "New Message", gen),
 			},
 		},
 		{
 			name: "observed generation updated",
 			current: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", start, gen),
+				newCondition("available", "false", "Reason", "Message", gen),
 			},
 			updates: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", middle, gen+1),
+				newCondition("available", "false", "Reason", "Message", gen+1),
 			},
 			expected: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", middle, gen+1),
+				newCondition("available", "false", "Reason", "Message", gen+1),
 			},
 		},
 		{
 			name: "status unchanged",
 			current: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", start, gen),
+				newCondition("available", "false", "Reason", "Message", gen),
 			},
 			updates: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", middle, gen),
+				newCondition("available", "false", "Reason", "Message", gen),
 			},
 			expected: []metav1.Condition{
-				newCondition("available", "false", "Reason", "Message", start, gen),
+				newCondition("available", "false", "Reason", "Message", gen),
 			},
 		},
 	}
 
-	// Simulate the passage of time between original condition creation
-	// and update processing
-	fakeClock.SetTime(later)
-
 	for _, tc := range testCases {
 		got := MergeConditions(tc.current, tc.updates...)
 		assert.ElementsMatch(t, tc.expected, got, tc.name)
+	}
+}
+
+func TestMergeConditionsTruncatesMessages(t *testing.T) {
+	longMsg := strings.Repeat("x", conditionMessageMaxLength+5)
+	cond := newCondition("available", metav1.ConditionTrue, "Reason", longMsg, 1)
+	conditions := MergeConditions(nil, cond)
+
+	if assert.Len(t, conditions, 1) {
+		assert.Len(t, conditions[0].Message, conditionMessageMaxLength)
+		prefixLen := conditionMessageMaxLength - len(conditionMessageTruncationSuffix)
+		expectedPrefix := strings.Repeat("x", prefixLen)
+		assert.True(t, strings.HasSuffix(conditions[0].Message, conditionMessageTruncationSuffix))
+		assert.Equal(t, expectedPrefix, conditions[0].Message[:prefixLen])
 	}
 }
 

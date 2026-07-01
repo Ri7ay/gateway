@@ -8,7 +8,6 @@ package v1alpha1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 )
 
 const (
@@ -30,6 +29,8 @@ const (
 	AppProtocolTypeWSS AppProtocolType = "gateway.envoyproxy.io/wss"
 )
 
+// +genclient
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // Backend allows the user to configure the endpoints of a backend and
 // the behavior of the connection from Envoy Proxy to the backend.
 //
@@ -55,6 +56,14 @@ type Backend struct {
 // +kubebuilder:validation:XValidation:rule="(has(self.fqdn) || has(self.ip) || has(self.unix))",message="one of fqdn, ip or unix must be specified"
 // +kubebuilder:validation:XValidation:rule="((has(self.fqdn) && !(has(self.ip) || has(self.unix))) || (has(self.ip) && !(has(self.fqdn) || has(self.unix))) || (has(self.unix) && !(has(self.ip) || has(self.fqdn))))",message="only one of fqdn, ip or unix can be specified"
 type BackendEndpoint struct {
+	// Hostname defines an optional hostname for the backend endpoint.
+	//
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+	// +optional
+	Hostname *string `json:"hostname,omitempty"`
+
 	// FQDN defines a FQDN endpoint
 	//
 	// +optional
@@ -123,6 +132,8 @@ type UnixSocket struct {
 
 // BackendSpec describes the desired state of BackendSpec.
 // +kubebuilder:validation:XValidation:rule="self.type != 'DynamicResolver' || !has(self.endpoints)",message="DynamicResolver type cannot have endpoints specified"
+// +kubebuilder:validation:XValidation:rule="self.type != 'DynamicResolver' || !has(self.tls) || !(has(self.tls.autoSNIFromEndpointHostname) && self.tls.autoSNIFromEndpointHostname)",message="DynamicResolver type cannot use autoSNIFromEndpointHostname"
+// +kubebuilder:validation:XValidation:rule="!has(self.tls) || !(has(self.tls.autoSNIFromEndpointHostname) && self.tls.autoSNIFromEndpointHostname) || self.endpoints.all(e, (!has(e.ip) && !has(e.unix)) || has(e.hostname))",message="when autoSNIFromEndpointHostname is enabled, IP and Unix endpoints must define a hostname"
 type BackendSpec struct {
 	// Type defines the type of the backend. Defaults to "Endpoints"
 	//
@@ -134,7 +145,7 @@ type BackendSpec struct {
 	// Endpoints defines the endpoints to be used when connecting to the backend.
 	//
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:MaxItems=256
 	// +kubebuilder:validation:XValidation:rule="self.all(f, has(f.fqdn)) || !self.exists(f, has(f.fqdn))",message="fqdn addresses cannot be mixed with other address types"
 	Endpoints []BackendEndpoint `json:"endpoints,omitempty"`
 
@@ -153,8 +164,9 @@ type BackendSpec struct {
 	Fallback *bool `json:"fallback,omitempty"`
 
 	// TLS defines the TLS settings for the backend.
-	// TLS.CACertificateRefs and TLS.WellKnownCACertificates can only be specified for DynamicResolver backends.
-	// TLS.InsecureSkipVerify can be specified for any Backends
+	// If TLS is specified here and a BackendTLSPolicy is also configured for the backend, the final TLS settings will
+	// be a merge of both configurations. In case of overlapping fields, the values defined in the BackendTLSPolicy will
+	// take precedence.
 	//
 	// +optional
 	TLS *BackendTLSSettings `json:"tls,omitempty"`
@@ -163,6 +175,7 @@ type BackendSpec struct {
 // BackendTLSSettings holds the TLS settings for the backend.
 // +kubebuilder:validation:XValidation:message="must not contain both CACertificateRefs and WellKnownCACertificates",rule="!(has(self.caCertificateRefs) && size(self.caCertificateRefs) > 0 && has(self.wellKnownCACertificates) && self.wellKnownCACertificates != \"\")"
 // +kubebuilder:validation:XValidation:message="must not contain either CACertificateRefs or WellKnownCACertificates when InsecureSkipVerify is enabled",rule="!((has(self.insecureSkipVerify) && self.insecureSkipVerify) && ((has(self.caCertificateRefs) && size(self.caCertificateRefs) > 0) || (has(self.wellKnownCACertificates) && self.wellKnownCACertificates != \"\")))"
+// +kubebuilder:validation:XValidation:message="sni and autoSNIFromEndpointHostname are mutually exclusive",rule="!(has(self.sni) && has(self.autoSNIFromEndpointHostname) && self.autoSNIFromEndpointHostname)"
 type BackendTLSSettings struct {
 	// CACertificateRefs contains one or more references to Kubernetes objects that
 	// contain TLS certificates of the Certificate Authorities that can be used
@@ -175,8 +188,6 @@ type BackendTLSSettings struct {
 	// specified. Only one of CACertificateRefs or WellKnownCACertificates may be specified,
 	// not both.
 	//
-	// Only used for DynamicResolver backends.
-	//
 	// +kubebuilder:validation:MaxItems=8
 	// +optional
 	CACertificateRefs []gwapiv1.LocalObjectReference `json:"caCertificateRefs,omitempty"`
@@ -188,10 +199,8 @@ type BackendTLSSettings struct {
 	// must be specified with at least one entry for a valid configuration. Only one of
 	// CACertificateRefs or WellKnownCACertificates may be specified, not both.
 	//
-	// Only used for DynamicResolver backends.
-	//
 	// +optional
-	WellKnownCACertificates *gwapiv1a3.WellKnownCACertificatesType `json:"wellKnownCACertificates,omitempty"`
+	WellKnownCACertificates *gwapiv1.WellKnownCACertificatesType `json:"wellKnownCACertificates,omitempty"`
 
 	// InsecureSkipVerify indicates whether the upstream's certificate verification
 	// should be skipped. Defaults to "false".
@@ -199,6 +208,39 @@ type BackendTLSSettings struct {
 	// +kubebuilder:default=false
 	// +optional
 	InsecureSkipVerify *bool `json:"insecureSkipVerify,omitempty"`
+
+	// SNI specifies the fixed SNI value used when establishing an upstream TLS connection to the backend.
+	//
+	// Envoy Gateway will use the HTTP host header value for SNI, when all resources referenced in BackendRefs are:
+	// 1. Backend resources that do not set SNI, or
+	// 2. Service/ServiceImport resources that do not have a BackendTLSPolicy attached to them
+	//
+	// If a BackendTLSPolicy is attached to the Backend resource, the BackendTLSPolicy's validation.hostname
+	// value takes precedence over this field.
+	//
+	// If no BackendTLSPolicy validation.hostname applies and both this field and AutoSNIFromEndpointHostname
+	// are unset, Envoy Gateway configures Envoy to set the upstream SNI from the downstream HTTP host/authority header.
+	//
+	// +optional
+	SNI *gwapiv1.PreciseHostname `json:"sni,omitempty"`
+
+	// AutoSNIFromEndpointHostname indicates whether the upstream endpoint's hostname should be used as the SNI value
+	// when establishing a TLS connection to the backend.
+	// This uses the resolved hostname of the upstream endpoint (e.g., from the Backend Endpoints list),
+	// rather than a static value.
+	//
+	// Mutually exclusive with SNI. When a BackendTLSPolicy is attached, its Hostname value takes
+	// precedence and AutoSNIFromEndpointHostname is ignored.
+	//
+	// +optional
+	AutoSNIFromEndpointHostname *bool `json:"autoSNIFromEndpointHostname,omitempty"`
+
+	// BackendTLSConfig defines the client certificate/key as well as TLS protocol parameters such as ciphers, TLS versions,
+	// and ALPN that the Envoy uses when connecting to the backend.
+	// When omitted, Envoy will fall back to the EnvoyProxy BackendTLS defaults, if any.
+	//
+	// +optional
+	*BackendTLSConfig `json:",inline"`
 }
 
 // BackendType defines the type of the Backend.
@@ -258,6 +300,7 @@ type BackendStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // BackendList contains a list of Backend resources.
 //
 // +kubebuilder:object:root=true
@@ -268,5 +311,5 @@ type BackendList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&Backend{}, &BackendList{})
+	localSchemeBuilder.Register(&Backend{}, &BackendList{})
 }

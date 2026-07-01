@@ -23,13 +23,16 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -45,6 +48,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/random"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/types"
+	"github.com/stretchr/testify/require"
+
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
+	"github.com/envoyproxy/gateway/internal/logging"
 )
 
 func TestImageFetcherOption_useAnonymous(t *testing.T) {
@@ -270,6 +277,64 @@ func TestImageFetcher_Fetch(t *testing.T) {
 	})
 }
 
+func TestImageFetcher_FetchWithCACert(t *testing.T) {
+	ctx := context.Background()
+	logger := logging.DefaultLogger(os.Stdout, egv1a1.LogLevelInfo)
+
+	t.Run("invalid CA certificate returns error", func(t *testing.T) {
+		opt := ImageFetcherOption{
+			CACert: []byte("fake-ca"),
+		}
+		fetcher, err := NewImageFetcher(ctx, opt, logger)
+		require.Error(t, err)
+		require.Nil(t, fetcher)
+		require.Contains(t, err.Error(), "failed to append CA certificate to pool")
+	})
+
+	t.Run("insecure mode ignores CA cert", func(t *testing.T) {
+		// When Insecure is true, the CA cert path is not considered,
+		// so NewImageFetcher should succeed even with a fake CA cert.
+		opt := ImageFetcherOption{
+			Insecure: true,
+			CACert:   []byte("fake-ca"),
+		}
+		fetcher, err := NewImageFetcher(ctx, opt, logger)
+		require.NoError(t, err)
+		require.NotNil(t, fetcher)
+	})
+
+	t.Run("valid PEM CA certificate succeeds", func(t *testing.T) {
+		// Using the certificate in test/e2e/testdata/jwt-local-jwks-inline.yaml.
+		validCACert := []byte(`-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIUYozfdHNlpdxcE7TCuF+wDOrxi9kwDQYJKoZIhvcNAQEL
+BQAwLTEVMBMGA1UECgwMZXhhbXBsZSBJbmMuMRQwEgYDVQQDDAtleGFtcGxlLmNv
+bTAeFw0yNTAxMDcxMzEwMjJaFw0zNTAxMDUxMzEwMjJaMC0xFTATBgNVBAoMDGV4
+YW1wbGUgSW5jLjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDm+2qqe20PGAVzGU4cuOp5K74tdtRiEVj8Jps9tVZx
+I9UIYbVHvJgDnX2yNyHgPs8s0hQ2q8Q2HAbqeUCRhmcuWhHkag+3rpKWjdGZWLHy
+9lAYv2RSybeTwQAGVDwSz8SrKog6aE6XvvJvUEpfStsJep2blACX2MOpERXiHs6w
+avIu1FTF6a31GyICqNYG07o533X5gfJDRYV3N6ari08Nd+iAaP8HVepc8wziBgFj
+3pdvCvkB1FPHKIbClQdIFgViDwLQYiagaR7esFYcPg6gdwvDJOoAh3GV66HNo7ev
+slY6KHQlRdlorjwxPt5dkGrkN7hiXRbItKqhQCy5GlmLAgMBAAGjUzBRMB0GA1Ud
+DgQWBBQz18iiu8P3gYwOwsuRG4YyDVQuxzAfBgNVHSMEGDAWgBQz18iiu8P3gYwO
+wsuRG4YyDVQuxzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQAg
+C4yDPACAHUjE09m3jmuJUtSSEr+FdXRZ9fkpTezYed6ebefz+4qbTb8HohsEC0K8
+52hg81Knh6n26FN/5S73/6k4LGcX4sN3WslKnRGdVuoXR3o1UGB4Rb0wtdNwOjZF
+5eI7Yxfg8nbsNS+6L+t/xgUj09wR34+fdv43XxxNjFPkWIagOItfG4jyyy+2ap/j
+kyzLypQx9SXeh6ELL4+I5AbNYwaLdoXUyPJHZfyqAABOZ+PVTUabBPiEJsCNmcbo
+toXi8O3UIo+oldyE771XJCGwMLLq75SJ79UZgy0yj3AGLVpirpgqEJT3Nd3VSWGF
+vjYDV/+uv3wEkMby25WT
+-----END CERTIFICATE-----`)
+
+		opt := ImageFetcherOption{
+			CACert: validCACert,
+		}
+		fetcher, err := NewImageFetcher(ctx, opt, logger)
+		require.NoError(t, err)
+		require.NotNil(t, fetcher)
+	})
+}
+
 func TestExtractDockerImage(t *testing.T) {
 	t.Run("no layers", func(t *testing.T) {
 		_, err := extractDockerImage(empty.Image)
@@ -451,6 +516,53 @@ func (r *mockLayer) Uncompressed() (io.ReadCloser, error) {
 }
 func (r *mockLayer) MediaType() (types.MediaType, error) { return r.mediaType, nil }
 
+type staticLayer struct {
+	content   []byte
+	mediaType types.MediaType
+}
+
+func (l *staticLayer) Digest() (v1.Hash, error) {
+	return v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("0", 64)}, nil
+}
+
+func (l *staticLayer) DiffID() (v1.Hash, error) {
+	return v1.Hash{Algorithm: "sha256", Hex: strings.Repeat("0", 64)}, nil
+}
+
+func (l *staticLayer) Compressed() (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(l.content)), nil
+}
+
+func (l *staticLayer) Uncompressed() (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(l.content)), nil
+}
+
+func (l *staticLayer) Size() (int64, error) {
+	return int64(len(l.content)), nil
+}
+
+func (l *staticLayer) MediaType() (types.MediaType, error) {
+	return l.mediaType, nil
+}
+
+type staticImage struct {
+	layers []v1.Layer
+}
+
+func (i *staticImage) Layers() ([]v1.Layer, error) { return i.layers, nil }
+func (i *staticImage) MediaType() (types.MediaType, error) {
+	return types.OCIManifestSchema1, nil
+}
+func (i *staticImage) Size() (int64, error)                    { return 0, nil }
+func (i *staticImage) ConfigName() (v1.Hash, error)            { return v1.Hash{}, nil }
+func (i *staticImage) ConfigFile() (*v1.ConfigFile, error)     { return nil, nil }
+func (i *staticImage) RawConfigFile() ([]byte, error)          { return nil, nil }
+func (i *staticImage) Digest() (v1.Hash, error)                { return v1.Hash{}, nil }
+func (i *staticImage) Manifest() (*v1.Manifest, error)         { return nil, nil }
+func (i *staticImage) RawManifest() ([]byte, error)            { return nil, nil }
+func (i *staticImage) LayerByDigest(v1.Hash) (v1.Layer, error) { return nil, nil }
+func (i *staticImage) LayerByDiffID(v1.Hash) (v1.Layer, error) { return nil, nil }
+
 func TestExtractOCIArtifactImage(t *testing.T) {
 	t.Run("valid", func(t *testing.T) {
 		// Create the image with custom media types.
@@ -486,6 +598,23 @@ func TestExtractOCIArtifactImage(t *testing.T) {
 
 		if !bytes.Equal(actual, want) {
 			t.Errorf("extractOCIArtifactImage got %s, but want '%s'", string(actual), string(want))
+		}
+	})
+
+	t.Run("reject oversized wasm layer", func(t *testing.T) {
+		wasmLayer := &staticLayer{
+			content:   []byte("hello"),
+			mediaType: "application/vnd.module.wasm.content.layer.v1+wasm",
+		}
+		configLayer := &staticLayer{
+			content:   []byte("{}"),
+			mediaType: "application/vnd.module.wasm.config.v1+json",
+		}
+		img := &staticImage{layers: []v1.Layer{wasmLayer, configLayer}}
+
+		_, err := extractOCIArtifactImageWithLimit(img, 4)
+		if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
+			t.Fatalf("extractOCIArtifactImage got error %v, want exceeds maximum size", err)
 		}
 	})
 
@@ -602,6 +731,48 @@ func TestExtractWasmPluginBinary(t *testing.T) {
 		_, err := extractWasmPluginBinary(buf)
 		if err == nil || !strings.Contains(err.Error(), "not found") {
 			t.Errorf("extractWasmPluginBinary must fail with not found")
+		}
+	})
+
+	t.Run("ignore oversized non-wasm entry", func(t *testing.T) {
+		buf := bytes.NewBuffer(nil)
+		gz := gzip.NewWriter(buf)
+		tw := tar.NewWriter(gz)
+		if err := tw.WriteHeader(&tar.Header{
+			Name: "non-wasm.txt",
+			Size: math.MaxInt64,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_ = tw.Close()
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := extractWasmPluginBinary(buf)
+		if err == nil {
+			t.Fatal("extractWasmPluginBinary must fail")
+		}
+	})
+
+	t.Run("reject oversized wasm entry", func(t *testing.T) {
+		buf := bytes.NewBuffer(nil)
+		gz := gzip.NewWriter(buf)
+		tw := tar.NewWriter(gz)
+		if err := tw.WriteHeader(&tar.Header{
+			Name: "plugin.wasm",
+			Size: math.MaxInt64,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_ = tw.Close()
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		_, err := extractWasmPluginBinary(buf)
+		if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
+			t.Fatalf("extractWasmPluginBinary got error %v, want exceeds maximum size", err)
 		}
 	})
 }

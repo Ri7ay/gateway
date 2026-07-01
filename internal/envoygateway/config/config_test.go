@@ -22,7 +22,7 @@ var (
 )
 
 func TestValidate(t *testing.T) {
-	cfg, err := New(os.Stdout)
+	cfg, err := New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	testCases := []struct {
@@ -65,7 +65,7 @@ func TestValidate(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.cfg.Validate()
+			_, err := tc.cfg.Validate()
 			if !tc.expect {
 				require.Error(t, err)
 			} else {

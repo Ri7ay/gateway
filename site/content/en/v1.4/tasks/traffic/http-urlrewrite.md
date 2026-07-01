@@ -378,7 +378,7 @@ kubectl get httproute/http-filter-url-regex-rewrite -o yaml
 ```
 
 Querying `http://${GATEWAY_HOST}/service/foo/v1/api` should rewrite the request to
-`http://${GATEWAY_HOST}/service/foo/v1/api`.
+`http://${GATEWAY_HOST}/v1/api/instance/foo`.
 
 ```console
 $ curl -L -vvv --header "Host: path.regex.rewrite.example" "http://${GATEWAY_HOST}/service/foo/v1/api"
@@ -694,6 +694,6 @@ You can see that the host is rewritten from `host.header.rewrite.example`, to th
 `x-custom-host` header `foo`. The original host header is preserved in the `X-Forwarded-Host` header.
 
 
-[HTTPURLRewriteFilter]: https://gateway-api.sigs.k8s.io/reference/spec#gateway.networking.k8s.io/v1.HTTPURLRewriteFilter
+[HTTPURLRewriteFilter]: https://gateway-api.sigs.k8s.io/reference/api-spec/main/spec/#gateway.networking.k8s.io/v1.HTTPURLRewriteFilter
 [HTTPRouteFilter]: ../../../api/extension_types#httproutefilter
 [RE2]: https://github.com/google/re2/wiki/Syntax

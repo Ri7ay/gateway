@@ -90,7 +90,7 @@ spec:
 `
 
 	udpRoute := `---
-apiVersion: gateway.networking.k8s.io/v1alpha2
+apiVersion: gateway.networking.k8s.io/v1
 kind: UDPRoute
 metadata:
   name: backend
@@ -111,12 +111,18 @@ spec:
 	f.Add([]byte(baseYAML + udpRoute + backendYAML))
 
 	f.Fuzz(func(t *testing.T, b []byte) {
-		rs, err := resource.LoadResourcesFromYAMLBytes(b, true)
+		rs, err := resource.LoadResourcesFromYAMLBytes(b, true, nil)
 		if err != nil {
 			return
 		}
 
-		_, err = egctl.TranslateGatewayAPIToXds("default", "cluster.local", "all", rs)
+		opts := &egctl.TranslationOptions{
+			GlobalRateLimitEnabled:  true,
+			EndpointRoutingDisabled: true,
+			EnvoyPatchPolicyEnabled: true,
+			BackendEnabled:          true,
+		}
+		_, err = egctl.TranslateGatewayAPIToXds("default", "cluster.local", "all", rs, opts)
 		if err != nil && strings.Contains(err.Error(), "failed to translate xds") {
 			t.Fatalf("%v", err)
 		}

@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 )
@@ -52,7 +55,7 @@ func ValidateEnvoyGateway(eg *egv1a1.EnvoyGateway) error {
 		return err
 	}
 
-	if err := validateEnvoyGatewayExtensionManager(eg.ExtensionManager); err != nil {
+	if err := validateEnvoyGatewayExtensionManagers(eg); err != nil {
 		return err
 	}
 
@@ -60,7 +63,27 @@ func ValidateEnvoyGateway(eg *egv1a1.EnvoyGateway) error {
 		return err
 	}
 
+	if err := validateEnvoyGatewayXDSServer(eg.XDSServer); err != nil {
+		return err
+	}
+
+	if eg.ExtensionAPIs != nil && eg.ExtensionAPIs.DisableLua != nil && *eg.ExtensionAPIs.DisableLua == eg.ExtensionAPIs.EnableLua {
+		return fmt.Errorf("disableLua and enableLua must not have the same value")
+	}
+
 	return nil
+}
+
+// WarnEnvoyGateway returns deprecation warnings for the provided EnvoyGateway configuration.
+func WarnEnvoyGateway(eg *egv1a1.EnvoyGateway) []string {
+	if eg == nil || eg.ExtensionAPIs == nil {
+		return nil
+	}
+	var warnings []string
+	if eg.ExtensionAPIs.DisableLua != nil {
+		warnings = append(warnings, "disableLua is deprecated, use enableLua instead")
+	}
+	return warnings
 }
 
 func validateEnvoyGatewayKubernetesProvider(provider *egv1a1.EnvoyGatewayKubernetesProvider) error {
@@ -127,7 +150,7 @@ func validateEnvoyGatewayCustomInfrastructureProvider(infra *egv1a1.EnvoyGateway
 			return fmt.Errorf("field 'host' should be specified when infrastructure type is 'Host'")
 		}
 	default:
-		return fmt.Errorf("unsupported infrastructure provdier: %s", infra.Type)
+		return fmt.Errorf("unsupported infrastructure provider: %s", infra.Type)
 	}
 	return nil
 }
@@ -144,6 +167,7 @@ func validateEnvoyGatewayLogging(logging *egv1a1.EnvoyGatewayLogging) error {
 			egv1a1.LogComponentGatewayAPIRunner,
 			egv1a1.LogComponentXdsTranslatorRunner,
 			egv1a1.LogComponentXdsServerRunner,
+			egv1a1.LogComponentXdsRunner,
 			egv1a1.LogComponentInfrastructureRunner,
 			egv1a1.LogComponentGlobalRateLimitRunner:
 			switch logLevel {
@@ -152,7 +176,7 @@ func validateEnvoyGatewayLogging(logging *egv1a1.EnvoyGatewayLogging) error {
 				return fmt.Errorf("envoy gateway logging level invalid. valid options: info/debug/warn/error")
 			}
 		default:
-			return fmt.Errorf("envoy gateway logging components invalid. valid options: system/provider/gateway-api/xds-translator/xds-server/infrastructure")
+			return fmt.Errorf("envoy gateway logging components invalid. valid options: system/provider/gateway-api/xds-translator/xds-server/xds/infrastructure")
 		}
 	}
 	return nil
@@ -175,6 +199,37 @@ func validateEnvoyGatewayRateLimit(rateLimit *egv1a1.RateLimit) error {
 		}
 	}
 	return nil
+}
+
+func validateEnvoyGatewayExtensionManagers(eg *egv1a1.EnvoyGateway) error {
+	if eg.ExtensionManager != nil && len(eg.ExtensionManagers) > 0 {
+		return fmt.Errorf("extensionManager and extensionManagers are mutually exclusive")
+	}
+
+	// Mirror +kubebuilder:validation:MinItems=1 for EnvoyGatewaySpec.ExtensionManagers:
+	// reject an explicitly-set-but-empty list. A nil slice means the field was omitted.
+	if eg.ExtensionManagers != nil && len(eg.ExtensionManagers) == 0 {
+		return fmt.Errorf("extensionManagers must contain at least one entry when specified")
+	}
+
+	if len(eg.ExtensionManagers) > 0 {
+		names := make(map[string]struct{})
+		for i, em := range eg.ExtensionManagers {
+			if em.Name == "" {
+				return fmt.Errorf("extension manager at index %d: name is required", i)
+			}
+			if _, exists := names[em.Name]; exists {
+				return fmt.Errorf("extension manager at index %d: duplicate name %q", i, em.Name)
+			}
+			names[em.Name] = struct{}{}
+			if err := validateEnvoyGatewayExtensionManager(&eg.ExtensionManagers[i]); err != nil {
+				return fmt.Errorf("extension manager %q: %w", em.Name, err)
+			}
+		}
+		return nil
+	}
+
+	return validateEnvoyGatewayExtensionManager(eg.ExtensionManager)
 }
 
 func validateEnvoyGatewayExtensionManager(extensionManager *egv1a1.ExtensionManager) error {
@@ -205,14 +260,71 @@ func validateEnvoyGatewayExtensionManager(extensionManager *egv1a1.ExtensionMana
 	}
 
 	if extensionManager.Service.TLS != nil {
-		certificateRefKind := extensionManager.Service.TLS.CertificateRef.Kind
-
-		if certificateRefKind == nil {
-			return fmt.Errorf("certificateRef empty in extension service server TLS settings")
+		certRef := &extensionManager.Service.TLS.CertificateRef
+		if (certRef.Group != nil && *certRef.Group != corev1.GroupName) ||
+			(certRef.Kind != nil && *certRef.Kind != "Secret") {
+			return fmt.Errorf("unsupported extension server TLS certificateRef group/kind")
 		}
 
-		if *certificateRefKind != "Secret" {
-			return fmt.Errorf("unsupported extension server TLS certificateRef %v", certificateRefKind)
+		if extensionManager.Service.TLS.ClientCertificateRef != nil {
+			clientCertRef := extensionManager.Service.TLS.ClientCertificateRef
+			if (clientCertRef.Group != nil && *clientCertRef.Group != corev1.GroupName) ||
+				(clientCertRef.Kind != nil && *clientCertRef.Kind != "Secret") {
+				return fmt.Errorf("unsupported extension server mTLS clientCertificateRef group/kind")
+			}
+		}
+	}
+	return nil
+}
+
+func validateEnvoyGatewayXDSServer(xdsServer *egv1a1.XDSServer) error {
+	if xdsServer == nil {
+		return nil
+	}
+
+	if xdsServer.MaxConnectionAge != nil {
+		d, err := time.ParseDuration(string(*xdsServer.MaxConnectionAge))
+		if err != nil {
+			return fmt.Errorf("invalid xdsServer.maxConnectionAge: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("xdsServer.maxConnectionAge must be greater than zero")
+		}
+	}
+
+	if xdsServer.MaxConnectionAgeGrace != nil {
+		d, err := time.ParseDuration(string(*xdsServer.MaxConnectionAgeGrace))
+		if err != nil {
+			return fmt.Errorf("invalid xdsServer.maxConnectionAgeGrace: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("xdsServer.maxConnectionAgeGrace must be greater than zero")
+		}
+	}
+
+	return nil
+}
+
+func validateEnvoyGatewayOpenTelemetrySink(sink *egv1a1.EnvoyGatewayOpenTelemetrySink) error {
+	if sink.Protocol != egv1a1.GRPCProtocol && sink.Protocol != egv1a1.HTTPProtocol {
+		return fmt.Errorf("unsupported protocol %s for OpenTelemetry sink, only 'grpc' and 'http' are supported", sink.Protocol)
+	}
+	if sink.ExportInterval != nil {
+		d, err := time.ParseDuration(string(*sink.ExportInterval))
+		if err != nil {
+			return fmt.Errorf("invalid exportInterval: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("exportInterval must be greater than zero")
+		}
+	}
+	if sink.ExportTimeout != nil {
+		d, err := time.ParseDuration(string(*sink.ExportTimeout))
+		if err != nil {
+			return fmt.Errorf("invalid exportTimeout: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("exportTimeout must be greater than zero")
 		}
 	}
 	return nil
@@ -229,7 +341,19 @@ func validateEnvoyGatewayTelemetry(telemetry *egv1a1.EnvoyGatewayTelemetry) erro
 				if sink.OpenTelemetry == nil {
 					return fmt.Errorf("OpenTelemetry is required when sink Type is OpenTelemetry")
 				}
+				if err := validateEnvoyGatewayOpenTelemetrySink(sink.OpenTelemetry); err != nil {
+					return err
+				}
 			}
+		}
+	}
+
+	if telemetry.Traces != nil {
+		if telemetry.Traces.Sink.OpenTelemetry == nil {
+			return fmt.Errorf("OpenTelemetry is required when trace sink Type is OpenTelemetry")
+		}
+		if err := validateEnvoyGatewayOpenTelemetrySink(telemetry.Traces.Sink.OpenTelemetry); err != nil {
+			return err
 		}
 	}
 	return nil

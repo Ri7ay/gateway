@@ -29,7 +29,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/avast/retry-go"
+	"github.com/avast/retry-go/v5"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	"github.com/envoyproxy/gateway/internal/logging"
@@ -130,8 +130,12 @@ func newPermissionCache(options permissionCacheOptions, logger logging.Logger) *
 
 // checkAndUpdatePermission checks the permission of the image against the pull secret and updates the cache entry.
 func (p *permissionCache) checkAndUpdatePermission(ctx context.Context, e *permissionCacheEntry) error {
-	fetcher := NewImageFetcher(ctx, *e.fetcherOption, p.logger)
-	_, _, err := fetcher.PrepareFetch(e.image.Host + e.image.Path)
+	fetcher, err := NewImageFetcher(ctx, *e.fetcherOption, p.logger)
+	if err != nil {
+		// Return a more descriptive error as messages downstream do not indicate the source very well.
+		return fmt.Errorf("failed to create image fetcher: %w", err)
+	}
+	_, _, err = fetcher.PrepareFetch(e.image.Host + e.image.Path)
 	e.checkError = err
 	e.lastCheck = time.Now()
 	return err
@@ -158,24 +162,23 @@ func (p *permissionCache) Start(ctx context.Context) {
 							const retryAttempts = 3
 							const retryDelay = 1 * time.Second
 							p.logger.Info("rechecking permission for image", "image", e.image.String())
-							err := retry.Do(
-								func() error {
-									err := p.checkAndUpdatePermission(ctx, e)
-									if err != nil && isRetriableError(err) {
-										p.logger.Error(
-											err,
-											"failed to check permission for image, will retry again",
-											"image",
-											e.image.String())
-										return err
-									}
-									return nil
-								},
+							err := retry.New(
 								retry.Attempts(retryAttempts),
 								retry.DelayType(retry.BackOffDelay),
 								retry.Delay(retryDelay),
 								retry.Context(ctx),
-							)
+							).Do(func() error {
+								err := p.checkAndUpdatePermission(ctx, e)
+								if err != nil && isRetriableError(err) {
+									p.logger.Error(
+										err,
+										"failed to check permission for image, will retry again",
+										"image",
+										e.image.String())
+									return err
+								}
+								return nil
+							})
 							if err != nil {
 								p.logger.Error(
 									err,

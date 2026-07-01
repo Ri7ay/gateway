@@ -35,4 +35,10 @@ type Manager interface {
 
 	// FailOpen returns true if the extension manager is configured to fail open, and false otherwise.
 	FailOpen() bool
+
+	// GetTranslationHookConfig returns the translation hook configuration.
+	GetTranslationHookConfig() *egv1a1.TranslationConfig
+
+	// CleanupHookConns closes all gRPC connections to extension services.
+	CleanupHookConns()
 }

@@ -1,0 +1,223 @@
+clientTrafficPolicies:
+- apiVersion: gateway.envoyproxy.io/v1alpha1
+  kind: ClientTrafficPolicy
+  metadata:
+    name: target-gateway-1
+    namespace: default
+  spec:
+    headers:
+      xForwardedClientCert:
+        certDetailsToAdd:
+        - Cert
+        mode: Sanitize
+    targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gateway-1
+    tls:
+      clientValidation:
+        caCertificateRefs:
+        - group: ""
+          name: tls-bundle-secret
+          namespace: default
+  status:
+    ancestors:
+    - ancestorRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: gateway-1
+        namespace: default
+      conditions:
+      - lastTransitionTime: null
+        message: Policy has been accepted.
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+gateways:
+- apiVersion: gateway.networking.k8s.io/v1
+  kind: Gateway
+  metadata:
+    name: gateway-1
+    namespace: default
+  spec:
+    gatewayClassName: envoy-gateway-class
+    listeners:
+    - allowedRoutes:
+        namespaces:
+          from: Same
+      name: http-1
+      port: 443
+      protocol: HTTPS
+      tls:
+        certificateRefs:
+        - name: tls-bundle-secret
+          namespace: default
+        mode: Terminate
+  status:
+    listeners:
+    - attachedRoutes: 1
+      conditions:
+      - lastTransitionTime: null
+        message: Sending translated listener configuration to the data plane
+        reason: Programmed
+        status: "True"
+        type: Programmed
+      - lastTransitionTime: null
+        message: Listener has been successfully translated
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: null
+        message: Listener references have been resolved
+        reason: ResolvedRefs
+        status: "True"
+        type: ResolvedRefs
+      name: http-1
+      supportedKinds:
+      - group: gateway.networking.k8s.io
+        kind: HTTPRoute
+      - group: gateway.networking.k8s.io
+        kind: GRPCRoute
+httpRoutes:
+- apiVersion: gateway.networking.k8s.io/v1
+  kind: HTTPRoute
+  metadata:
+    name: httproute-1
+    namespace: default
+  spec:
+    parentRefs:
+    - name: gateway-1
+      namespace: default
+      sectionName: http-1
+    rules:
+    - backendRefs:
+      - name: service-1
+        port: 8080
+  status:
+    parents:
+    - conditions:
+      - lastTransitionTime: null
+        message: Route is accepted
+        reason: Accepted
+        status: "True"
+        type: Accepted
+      - lastTransitionTime: null
+        message: Resolved all the Object references for the Route
+        reason: ResolvedRefs
+        status: "True"
+        type: ResolvedRefs
+      controllerName: gateway.envoyproxy.io/gatewayclass-controller
+      parentRef:
+        name: gateway-1
+        namespace: default
+        sectionName: http-1
+infraIR:
+  default/gateway-1:
+    proxy:
+      listeners:
+      - name: default/gateway-1/http-1
+        ports:
+        - containerPort: 10443
+          name: https-443
+          protocol: HTTPS
+          servicePort: 443
+      metadata:
+        labels:
+          gateway.envoyproxy.io/owning-gateway-name: gateway-1
+          gateway.envoyproxy.io/owning-gateway-namespace: default
+        ownerReference:
+          kind: GatewayClass
+          name: envoy-gateway-class
+      name: default/gateway-1
+      namespace: envoy-gateway-system
+xdsIR:
+  default/gateway-1:
+    accessLog:
+      json:
+      - path: /dev/stdout
+    globalResources:
+      proxyServiceCluster:
+        metadata:
+          kind: Service
+          name: envoy-default-gateway-1-bfd08ef4
+          namespace: envoy-gateway-system
+          sectionName: "8080"
+        name: default/gateway-1
+        settings:
+        - addressType: IP
+          endpoints:
+          - host: 7.6.5.4
+            port: 8080
+            zone: zone1
+          metadata:
+            kind: Service
+            name: envoy-default-gateway-1-bfd08ef4
+            namespace: envoy-gateway-system
+            sectionName: "8080"
+          name: default/gateway-1
+          protocol: TCP
+    http:
+    - address: 0.0.0.0
+      externalPort: 443
+      headers:
+        withUnderscoresAction: RejectRequest
+        xForwardedClientCert:
+          mode: Sanitize
+      hostnames:
+      - '*'
+      metadata:
+        kind: Gateway
+        name: gateway-1
+        namespace: default
+        sectionName: http-1
+      name: default/gateway-1/http-1
+      path:
+        escapedSlashesAction: UnescapeAndRedirect
+        mergeSlashes: true
+      port: 10443
+      routes:
+      - destination:
+          metadata:
+            kind: HTTPRoute
+            name: httproute-1
+            namespace: default
+          name: httproute/default/httproute-1/rule/0
+          settings:
+          - addressType: IP
+            endpoints:
+            - host: 7.7.7.7
+              port: 8080
+            metadata:
+              kind: Service
+              name: service-1
+              namespace: default
+              sectionName: "8080"
+            name: httproute/default/httproute-1/rule/0/backend/0
+            protocol: HTTP
+            weight: 1
+        hostname: '*'
+        isHTTP2: false
+        metadata:
+          kind: HTTPRoute
+          name: httproute-1
+          namespace: default
+        name: httproute/default/httproute-1/rule/0/match/-1/*
+      tls:
+        alpnProtocols: null
+        caCertificate:
+          certificate: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUR0akNDQXA2Z0F3SUJBZ0lKQVBjYWRkYVBsSk1BTUEwR0NTcUdTSWIzRFFFQkN3VUFNRzh4Q3pBSkJnTlYKQkFZVEFsVlRNUXN3Q1FZRFZRUUlEQUpXUVRFUk1BOEdBMVVFQnd3SVUyOXRaVU5wZEhreEV6QVJCZ05WQkFvTQpDa1Z1ZG05NVVISnZlSGt4RURBT0JnTlZCQXNNQjBkaGRHVjNZWGt4R1RBWEJnTlZCQU1NRUcxMGJITXVaWGhoCmJYQnNaUzVqYjIwd0lCY05Nall3TlRJMU1ESTBNekExV2hnUE1qRXlOakExTURFd01qUXpNRFZhTUc4eEN6QUoKQmdOVkJBWVRBbFZUTVFzd0NRWURWUVFJREFKV1FURVJNQThHQTFVRUJ3d0lVMjl0WlVOcGRIa3hFekFSQmdOVgpCQW9NQ2tWdWRtOTVVSEp2ZUhreEVEQU9CZ05WQkFzTUIwZGhkR1YzWVhreEdUQVhCZ05WQkFNTUVHMTBiSE11ClpYaGhiWEJzWlM1amIyMHdnZ0VpTUEwR0NTcUdTSWIzRFFFQkFRVUFBNElCRHdBd2dnRUtBb0lCQVFDbldqV2YKdy9DNHVOQlpuZHNHQmRZTndmeU9Ocll4QkwrVFdkVTJIQjVRMklDQzNrTklLSXArV0UxZnFITUpzeFdJTE1SWApzeHVaa1B3cXN4Zy95cm1TNThaaFJ0MnQvN0EyNDVISkJMbWd2SUxoa3JvNkhla1hPajJEdTFhcG9yc0tXZjUxCnBYNWFkMVRZYTFaUXdNUEYxOWpXWjVLTzBuVEVKRmtGc1NpYmpsT1ZVYjhvbU9PU1ZrMStPai91TFo1WXI1WkcKOGVIZ2ZVa2hYd09EZUd1Snc1WDNaTXlXUHQrMDFadUZiSU84eHZIbnVHT0NpdW1pMGJzUGtyallhYnNJRWpWVwpwWGlGY1ZNYkFzNFV4NldmaGlnNnBlUWVqSVQwSGpwNVI4b1Y1VXBWK205WVNZblJ4SjJaK29tUHZKMkY0aEpVCjg2ZHNwTVI1eUZzWEFldXBBZ01CQUFHalV6QlJNQThHQTFVZEV3RUIvd1FGTUFNQkFmOHdIUVlEVlIwT0JCWUUKRklvaGNUbzg4Njc5QUdMM1FhdFkxM2plSWxvck1COEdBMVVkSXdRWU1CYUFGSW9oY1RvODg2NzlBR0wzUWF0WQoxM2plSWxvck1BMEdDU3FHU0liM0RRRUJDd1VBQTRJQkFRQm9OMytUb3Y5Y2VvNDR4UXdOdG8wRzl1L3Yzb01GCnpIbTFId3ZPVzZsak9rUWtXVEZlaytLWE9Vb2tvTFl2VkpEVE9Qa29BMGZHSW1tUEhYTDFReWVyalR1ZjUvS1oKWTBCNk5NSUJjdGRKcXl2cStRZlhBYk92ZldpNmlHZ1N1NHEwa1BvRzV6Um9MbkZEZUlLM0YxRzZVaTdFZ0tNcgpPaW5uTlZsUWEzUzlCenRTenJkc3pyUFEvT1k2MHA2SG0xNXIySDkwOHIzUytYWS9GaHhIQmJwYUc5RDBXcnBVCnF2ancxZThNeUpMNzlIbi9vemtndUhkV3dlSXBILzNPSjBQQXE2em9tWEt3VG5mYXpLazdkZlI3WGUralhWU3cKc25NTUo5RlVOU1NyN3BzZGVYVmNrUW0wejN2ZW83ZUhBdkFxaEZpZ2w1aFFGSS9KZG9xMGUyWDYKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQotLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS0KTUlJRHRqQ0NBcDZnQXdJQkFnSUpBTFZhSUloa29jbHlNQTBHQ1NxR1NJYjNEUUVCQ3dVQU1HOHhDekFKQmdOVgpCQVlUQWxWVE1Rc3dDUVlEVlFRSURBSldRVEVSTUE4R0ExVUVCd3dJVTI5dFpVTnBkSGt4RXpBUkJnTlZCQW9NCkNrVnVkbTk1VUhKdmVIa3hFREFPQmdOVkJBc01CMGRoZEdWM1lYa3hHVEFYQmdOVkJBTU1FRzEwYkhNdVpYaGgKYlhCc1pTNWpiMjB3SUJjTk1qWXdOVEkxTURJME16QTFXaGdQTWpFeU5qQTFNREV3TWpRek1EVmFNRzh4Q3pBSgpCZ05WQkFZVEFsVlRNUXN3Q1FZRFZRUUlEQUpXUVRFUk1BOEdBMVVFQnd3SVUyOXRaVU5wZEhreEV6QVJCZ05WCkJBb01Da1Z1ZG05NVVISnZlSGt4RURBT0JnTlZCQXNNQjBkaGRHVjNZWGt4R1RBWEJnTlZCQU1NRUcxMGJITXUKWlhoaGJYQnNaUzVqYjIwd2dnRWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUJEd0F3Z2dFS0FvSUJBUUNqUm1kMApwU2Z1TnVJTkJBMFdCWEFkOE10MjIzb2lZVndrcVU1amFLWjZWQ0g1N25nVEhYQlZ0MjUxVWJXSm9DclhGczJYClg1RXRqSDZmT3JzYk8raCtrblNYWHpQeCszYUx1Vk9ZMjAvMWppQ1FXRFVGWWZqSFYvKzRsNUhON3daYWVRZkcKUndhbm04ZHZTZUVBZGxRWHgxbG1hNXp2WFo3ZHZzWXBNbkI1MlJZYWR1R1JoYWZHRmdyRmNHNkJPNjB6SlBKRgpXc094Yi9hL2NMNll6MHNXUmxkdVVLK1dYY21vSzdDeERUdmo1a1RCeExzK1BZTVZyTTVUOXJlanJmc0dlb1ZxCjA0eXZXRnMybXJRbjVMT1k0VFdFa0FaV200R0lNVlFGR1U1TmRqbFJXUEFSdFpLNUFraDRIUDlTRkFURUlKaVQKS01IYlhJV0kwYkNQZmRiRkFnTUJBQUdqVXpCUk1BOEdBMVVkRXdFQi93UUZNQU1CQWY4d0hRWURWUjBPQkJZRQpGRmlXbGNheHllTW9YbGNvWG0wc0JLbW50alVvTUI4R0ExVWRJd1FZTUJhQUZGaVdsY2F4eWVNb1hsY29YbTBzCkJLbW50alVvTUEwR0NTcUdTSWIzRFFFQkN3VUFBNElCQVFCVHZEVUEzM3B3Q2V0cTVhcEFYSGF0YXV1aFpSbUUKcGJzcjlEMlNYTUpvVU5pVTQ0THk5b29SbXBJMUgwcnpTMXd6bDY2TUpKcGRrUUE0OHFZMTY5YnZXc04rMzJudApVZXM2Q2xrdTBoTEcxSGorUDdCS2IyckJ3TDBZQmRMYjU5Sy84S3hoLzlXWnlDc2NEdVRpWkZFRWg1dU94V2M0CklqbG5mcmJ1NkFVT0g5NHY3c3EvdVdxN2laVlFzY25KVHVDa3Vmc1NoZkdMZ2EzaURvYjBzS2xlemFKZlJtUkYKczBpVVdsSkpyU1ppMkVCVUdBY0xJc3FrZWcwUUVNN1RVanVNVktBWWFLYldnclFpdHdBTnBNRVVVMFlYNkhvYgp4Z3hqbzdYV1VZZkM3dHZiNHM2TStmK0dITXhLVHIyRldBZ0Y5ZHpOTDJlRTYxemdSMitrQUpxYgotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+          name: default/target-gateway-1/ca.crt
+        certificates:
+        - certificate: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURuVENDQW9XZ0F3SUJBZ0lCQURBTkJna3Foa2lHOXcwQkFRc0ZBREJ2TVFzd0NRWURWUVFHRXdKVlV6RUwKTUFrR0ExVUVDQXdDVmtFeEVUQVBCZ05WQkFjTUNGTnZiV1ZEYVhSNU1STXdFUVlEVlFRS0RBcEZiblp2ZVZCeQpiM2g1TVJBd0RnWURWUVFMREFkSFlYUmxkMkY1TVJrd0Z3WURWUVFEREJCdGRHeHpMbVY0WVcxd2JHVXVZMjl0Ck1DQVhEVEkxTVRJeE16RTFNREV5TWxvWUR6SXhNalV4TVRFNU1UVXdNVEl5V2pCdk1Rc3dDUVlEVlFRR0V3SlYKVXpFTE1Ba0dBMVVFQ0F3Q1ZrRXhFVEFQQmdOVkJBY01DRk52YldWRGFYUjVNUk13RVFZRFZRUUtEQXBGYm5adgplVkJ5YjNoNU1SQXdEZ1lEVlFRTERBZEhZWFJsZDJGNU1Sa3dGd1lEVlFRRERCQnRkR3h6TG1WNFlXMXdiR1V1ClkyOXRNSUlCSWpBTkJna3Foa2lHOXcwQkFRRUZBQU9DQVE4QU1JSUJDZ0tDQVFFQXhqYTg3ZGx0SGNLeHhVQWoKRklhOW5IYloxQWRHR0dodFlxZVQ4Rnp4VVMrY2dVZ2dZUERVQVFwNm1TeUp0cmlYOFAwNzdJQWlTOEh0RmtkdgpONHJ2L1NBbVJGU0k2eFRPMXorTzE3Rk92eWZtQ1FEU0NMTEVZQ0NoMDVmUVowSkFOeW42eHlmR3FnVUtGazZvCnhaYWoyQWF1QmViN3JCejk1RkJMekdYeC9lWmorNDhaYXdTalEvaWsrWXJIR1NpcXpXRDFRMVIxaHVhVHhPNVAKejFLRFFJQUR4RElXa1l2RktPZEQra1FKVkpoNlhIc2plSytXSUlidVpta2xWTGdGK1Q4WkkwVHZYYkxYbmZ0eApNa1FxRFF6T3VacXJsdFZ3eTFrbWpCWGJuMUZnU1o2ZVMwMWFLL1pDSElhdlJaYzRYUlo5elUxVlhuL212T1lNCmc2MUtpUUlEQVFBQm8wSXdRREFkQmdOVkhRNEVGZ1FVY0JmUXBidDZYNzZZY2dIQkZ5ZXZKVDNsQkNrd0h3WUQKVlIwakJCZ3dGb0FVcjh6bXY0ZlZJKzFkN3ltekNUNnVIQTVFUkNjd0RRWUpLb1pJaHZjTkFRRUxCUUFEZ2dFQgpBTXdBWVord3dRR0FnazJ1b3Z0MEU3TjhCWlVKbG1lNW1scEcvYm5qRU5KSlBGQnFONGg3Wnl1cWc5OFFSd2srClZYZHhlQ3AxSWRCTGk4MFRTbjRtVTk1VTV4Lzg5T0oxWlpqZytub1dvY1dydUFlTW8xa2RQc2lkai9TWXBIYksKOVNDZVJUVm5xcDBtcER2WjA0M2tvZzNWZkJzNGhaZEhIblBadnNqbnZrS1pob2dUcVNSak5NdU9WdU9TYU5YaQo2SFd6ZTFDalgyZDhPd1JOaUhtMjg2Z1JoZjFxcHBtaThxK3kvbkFuRk16U0VlcCs2UkhTczh0N0FiYUU0NTRmCk56eXJNaTlhaXJmK0w0ajBjQ2JvQW1ieTZlZUZDNUlIK1B0YXpCNGd4K0pKT1MrTmFxd3pTZFh0REJTdGxKdkYKOHBpY2t0WUJ0NzdrZmJqcWxKaFJEdkU9Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
+          name: default/tls-bundle-secret
+          privateKey: '[redacted]'
+        clientValidationEnabled: true
+        maxVersion: "1.3"
+        minVersion: "1.2"
+        requireClientCertificate: true
+    readyListener:
+      address: 0.0.0.0
+      ipFamily: IPv4
+      path: /ready
+      port: 19003

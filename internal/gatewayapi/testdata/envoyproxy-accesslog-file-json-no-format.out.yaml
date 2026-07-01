@@ -1,8 +1,103 @@
+envoyProxyForGatewayClass:
+  apiVersion: gateway.envoyproxy.io/v1alpha1
+  kind: EnvoyProxy
+  metadata:
+    name: test
+    namespace: envoy-gateway-system
+  spec:
+    logging: {}
+    provider:
+      kubernetes:
+        envoyDeployment:
+          container:
+            env:
+            - name: env_a
+              value: env_a_value
+            - name: env_b
+              value: env_b_name
+            image: envoyproxy/envoy:distroless-dev
+            resources:
+              requests:
+                cpu: 100m
+                memory: 512Mi
+            securityContext:
+              allowPrivilegeEscalation: false
+              runAsUser: 2000
+          pod:
+            affinity:
+              nodeAffinity:
+                requiredDuringSchedulingIgnoredDuringExecution:
+                  nodeSelectorTerms:
+                  - matchExpressions:
+                    - key: cloud.google.com/gke-nodepool
+                      operator: In
+                      values:
+                      - router-node
+            annotations:
+              key1: val1
+              key2: val2
+            securityContext:
+              fsGroup: 2000
+              fsGroupChangePolicy: OnRootMismatch
+              runAsGroup: 3000
+              runAsUser: 1000
+            tolerations:
+            - effect: NoSchedule
+              key: node-type
+              operator: Exists
+              value: router
+            volumes:
+            - name: certs
+              secret:
+                secretName: envoy-cert
+          replicas: 2
+        envoyService:
+          type: LoadBalancer
+      type: Kubernetes
+    telemetry:
+      accessLog:
+        settings:
+        - format:
+            type: JSON
+          sinks:
+          - file:
+              path: /dev/stdout
+            type: File
+  status:
+    ancestors:
+    - ancestorRef:
+        group: gateway.networking.k8s.io
+        kind: GatewayClass
+        name: envoy-gateway-class
+      conditions:
+      - lastTransitionTime: null
+        message: EnvoyProxy has been accepted.
+        reason: Accepted
+        status: "True"
+        type: Accepted
+gatewayClass:
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: GatewayClass
+  metadata:
+    name: envoy-gateway-class
+  spec:
+    controllerName: gateway.envoyproxy.io/gatewayclass-controller
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: test
+      namespace: envoy-gateway-system
+  status:
+    conditions:
+    - lastTransitionTime: null
+      message: Valid GatewayClass
+      reason: Accepted
+      status: "True"
+      type: Accepted
 gateways:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: Gateway
   metadata:
-    creationTimestamp: null
     name: gateway-1
     namespace: envoy-gateway
   spec:
@@ -46,7 +141,6 @@ infraIR:
         apiVersion: gateway.envoyproxy.io/v1alpha1
         kind: EnvoyProxy
         metadata:
-          creationTimestamp: null
           name: test
           namespace: envoy-gateway-system
         spec:
@@ -108,10 +202,20 @@ infraIR:
                 - file:
                     path: /dev/stdout
                   type: File
-        status: {}
+        status:
+          ancestors:
+          - ancestorRef:
+              group: gateway.networking.k8s.io
+              kind: GatewayClass
+              name: envoy-gateway-class
+            conditions:
+            - lastTransitionTime: null
+              message: EnvoyProxy has been accepted.
+              reason: Accepted
+              status: "True"
+              type: Accepted
       listeners:
-      - address: null
-        name: envoy-gateway/gateway-1/http
+      - name: envoy-gateway/gateway-1/http
         ports:
         - containerPort: 10080
           name: http-80
@@ -131,11 +235,32 @@ xdsIR:
     accessLog:
       json:
       - path: /dev/stdout
+    globalResources:
+      proxyServiceCluster:
+        metadata:
+          kind: Service
+          name: envoy-envoy-gateway-gateway-1-196ae069
+          namespace: envoy-gateway-system
+          sectionName: "8080"
+        name: envoy-gateway/gateway-1
+        settings:
+        - addressType: IP
+          endpoints:
+          - host: 7.6.5.4
+            port: 8080
+            zone: zone1
+          metadata:
+            kind: Service
+            name: envoy-envoy-gateway-gateway-1-196ae069
+            namespace: envoy-gateway-system
+            sectionName: "8080"
+          name: envoy-gateway/gateway-1
+          protocol: TCP
     http:
     - address: 0.0.0.0
+      externalPort: 80
       hostnames:
       - '*'
-      isHTTP2: false
       metadata:
         kind: Gateway
         name: gateway-1

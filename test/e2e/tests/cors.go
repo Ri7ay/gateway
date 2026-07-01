@@ -12,7 +12,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/gateway-api/conformance/utils/http"
 	"sigs.k8s.io/gateway-api/conformance/utils/kubernetes"
 	"sigs.k8s.io/gateway-api/conformance/utils/suite"
@@ -22,7 +21,7 @@ import (
 )
 
 func init() {
-	ConformanceTests = append(ConformanceTests, CORSFromSecurityPolicyTest, CORSFromHTTPCORSFilterTest)
+	ConformanceTests = append(ConformanceTests, CORSFromSecurityPolicyTest)
 }
 
 var CORSFromSecurityPolicyTest = suite.ConformanceTest{
@@ -30,38 +29,24 @@ var CORSFromSecurityPolicyTest = suite.ConformanceTest{
 	Description: "Test CORS from SecurityPolicy",
 	Manifests:   []string{"testdata/cors-security-policy.yaml"},
 	Test: func(t *testing.T, suite *suite.ConformanceTestSuite) {
-		runCORStest(t, suite, true)
+		runCORStest(t, suite)
 	},
 }
 
-var CORSFromHTTPCORSFilterTest = suite.ConformanceTest{
-	ShortName:   "CORSFromHTTPCORSFilter",
-	Description: "Test CORS from HTTP CORS Filter",
-	Manifests:   []string{"testdata/cors-http-cors-filter.yaml"},
-	Test: func(t *testing.T, suite *suite.ConformanceTestSuite) {
-		runCORStest(t, suite, false)
-	},
-}
-
-func runCORStest(t *testing.T, suite *suite.ConformanceTestSuite, withSecurityPolicy bool) {
+func runCORStest(t *testing.T, suite *suite.ConformanceTestSuite) {
 	ns := "gateway-conformance-infra"
 	routeNN := types.NamespacedName{Name: "http-with-cors-exact", Namespace: ns}
 	gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
-	gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+	gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
-	ancestorRef := gwapiv1a2.ParentReference{
+	ancestorRef := gwapiv1.ParentReference{
 		Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
 		Kind:      gatewayapi.KindPtr(resource.KindGateway),
 		Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
 		Name:      gwapiv1.ObjectName(gwNN.Name),
 	}
 
-	if withSecurityPolicy {
-		SecurityPolicyMustBeAccepted(t, suite.Client, types.NamespacedName{Name: "cors-exact", Namespace: ns}, suite.ControllerName, ancestorRef)
-	}
-	if withSecurityPolicy {
-		SecurityPolicyMustBeAccepted(t, suite.Client, types.NamespacedName{Name: "cors-exact", Namespace: ns}, suite.ControllerName, ancestorRef)
-	}
+	SecurityPolicyMustBeAccepted(t, suite.Client, types.NamespacedName{Name: "cors-exact", Namespace: ns}, suite.ControllerName, ancestorRef)
 
 	t.Run("should enable cors with Allow Origin Exact", func(t *testing.T) {
 		expectedResponse := http.ExpectedResponse{
@@ -86,7 +71,7 @@ func runCORStest(t *testing.T, suite *suite.ConformanceTestSuite, withSecurityPo
 				},
 			},
 			Response: http.Response{
-				StatusCode: 200,
+				StatusCodes: []int{200},
 				Headers: map[string]string{
 					"access-control-allow-origin":   "https://www.foo.com",
 					"access-control-allow-methods":  "GET, POST, PUT, PATCH, DELETE, OPTIONS",
@@ -122,7 +107,7 @@ func runCORStest(t *testing.T, suite *suite.ConformanceTestSuite, withSecurityPo
 				},
 			},
 			Response: http.Response{
-				StatusCode: 200,
+				StatusCodes: []int{200},
 				Headers: map[string]string{
 					"access-control-allow-origin":   "https://anydomain.foobar.com",
 					"access-control-allow-methods":  "GET, POST, PUT, PATCH, DELETE, OPTIONS",
@@ -190,7 +175,7 @@ func runCORStest(t *testing.T, suite *suite.ConformanceTestSuite, withSecurityPo
 				},
 			},
 			Response: http.Response{
-				StatusCode: 200,
+				StatusCodes: []int{200},
 				Headers: map[string]string{
 					"access-control-allow-origin":   "https://foo.bar.com",
 					"access-control-allow-methods":  "GET",

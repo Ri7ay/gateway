@@ -7,6 +7,8 @@ package translator
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
@@ -48,7 +50,8 @@ func (*extProc) patchHCM(mgr *hcmv3.HttpConnectionManager, irListener *ir.HTTPLi
 			continue
 		}
 
-		for _, ep := range route.EnvoyExtensions.ExtProcs {
+		for i := range route.EnvoyExtensions.ExtProcs {
+			ep := &route.EnvoyExtensions.ExtProcs[i]
 			if hcmContainsFilter(mgr, extProcFilterName(ep)) {
 				continue
 			}
@@ -67,8 +70,11 @@ func (*extProc) patchHCM(mgr *hcmv3.HttpConnectionManager, irListener *ir.HTTPLi
 }
 
 // buildHCMExtProcFilter returns an ext_proc HTTP filter from the provided IR HTTPRoute.
-func buildHCMExtProcFilter(extProc ir.ExtProc) (*hcmv3.HttpFilter, error) {
-	extAuthProto := extProcConfig(extProc)
+func buildHCMExtProcFilter(extProc *ir.ExtProc) (*hcmv3.HttpFilter, error) {
+	extAuthProto, err := extProcConfig(extProc)
+	if err != nil {
+		return nil, err
+	}
 	extAuthAny, err := anypb.New(extAuthProto)
 	if err != nil {
 		return nil, err
@@ -85,19 +91,17 @@ func buildHCMExtProcFilter(extProc ir.ExtProc) (*hcmv3.HttpFilter, error) {
 	}, nil
 }
 
-func extProcFilterName(extProc ir.ExtProc) string {
+func extProcFilterName(extProc *ir.ExtProc) string {
 	return perRouteFilterName(egv1a1.EnvoyFilterExtProc, extProc.Name)
 }
 
-func extProcConfig(extProc ir.ExtProc) *extprocv3.ExternalProcessor {
+func extProcConfig(extProc *ir.ExtProc) (*extprocv3.ExternalProcessor, error) {
 	config := &extprocv3.ExternalProcessor{
 		GrpcService: &corev3.GrpcService{
 			TargetSpecifier: &corev3.GrpcService_EnvoyGrpc_{
 				EnvoyGrpc: grpcExtProcService(extProc),
 			},
-			Timeout: &durationpb.Duration{
-				Seconds: defaultExtServiceRequestTimeout,
-			},
+			Timeout: durationpb.New(defaultExtServiceRequestTimeout),
 		},
 	}
 
@@ -112,41 +116,41 @@ func extProcConfig(extProc ir.ExtProc) *extprocv3.ExternalProcessor {
 	}
 
 	if extProc.RequestAttributes != nil {
-		var attrs []string
-		attrs = append(attrs, extProc.RequestAttributes...)
-		config.RequestAttributes = attrs
+		config.RequestAttributes = slices.Clone(extProc.RequestAttributes)
 	}
 
 	if extProc.ResponseAttributes != nil {
-		var attrs []string
-		attrs = append(attrs, extProc.ResponseAttributes...)
-		config.ResponseAttributes = attrs
+		config.ResponseAttributes = slices.Clone(extProc.ResponseAttributes)
+	}
+
+	if extProc.Traffic != nil && extProc.Traffic.Retry != nil {
+		rp, err := buildNonRouteRetryPolicy(extProc.Traffic.Retry)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build retry policy for extproc: %w", err)
+		}
+		config.GrpcService.RetryPolicy = rp
 	}
 
 	if extProc.ForwardingMetadataNamespaces != nil || extProc.ReceivingMetadataNamespaces != nil {
 		config.MetadataOptions = &extprocv3.MetadataOptions{}
 
 		if extProc.ForwardingMetadataNamespaces != nil {
-			var ns []string
-			ns = append(ns, extProc.ForwardingMetadataNamespaces...)
 			config.MetadataOptions.ForwardingNamespaces = &extprocv3.MetadataOptions_MetadataNamespaces{
-				Untyped: ns,
+				Untyped: slices.Clone(extProc.ForwardingMetadataNamespaces),
 			}
 		}
 
 		if extProc.ReceivingMetadataNamespaces != nil {
-			var ns []string
-			ns = append(ns, extProc.ReceivingMetadataNamespaces...)
 			config.MetadataOptions.ReceivingNamespaces = &extprocv3.MetadataOptions_MetadataNamespaces{
-				Untyped: ns,
+				Untyped: slices.Clone(extProc.ReceivingMetadataNamespaces),
 			}
 		}
 	}
 	config.AllowModeOverride = extProc.AllowModeOverride
-	return config
+	return config, nil
 }
 
-func grpcExtProcService(extProc ir.ExtProc) *corev3.GrpcService_EnvoyGrpc {
+func grpcExtProcService(extProc *ir.ExtProc) *corev3.GrpcService_EnvoyGrpc {
 	return &corev3.GrpcService_EnvoyGrpc{
 		ClusterName: extProc.Destination.Name,
 		Authority:   extProc.Authority,
@@ -201,16 +205,19 @@ func (*extProc) patchRoute(route *routev3.Route, irRoute *ir.HTTPRoute, _ *ir.HT
 		return nil
 	}
 
-	for _, ep := range irRoute.EnvoyExtensions.ExtProcs {
+	for i := range irRoute.EnvoyExtensions.ExtProcs {
+		ep := &irRoute.EnvoyExtensions.ExtProcs[i]
 		filterName := extProcFilterName(ep)
-		if err := enableFilterOnRoute(route, filterName); err != nil {
+		if err := enableFilterOnRoute(route, filterName, &routev3.FilterConfig{
+			Config: &anypb.Any{},
+		}); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func buildProcessingMode(extProc ir.ExtProc) *extprocv3.ProcessingMode {
+func buildProcessingMode(extProc *ir.ExtProc) *extprocv3.ProcessingMode {
 	processingMode := &extprocv3.ProcessingMode{
 		RequestHeaderMode:   extprocv3.ProcessingMode_SKIP,
 		ResponseHeaderMode:  extprocv3.ProcessingMode_SKIP,

@@ -19,20 +19,17 @@ import (
 	"testing"
 	"time"
 
-	dockertypes "github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/archive"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/daemon"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	goarchive "github.com/moby/go-archive"
+	"github.com/moby/moby/client"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/gateway-api/conformance/utils/http"
 	"sigs.k8s.io/gateway-api/conformance/utils/kubernetes"
 	"sigs.k8s.io/gateway-api/conformance/utils/suite"
@@ -83,7 +80,7 @@ var OCIWasmTest = suite.ConformanceTest{
 		eep := createEEPForWasmTest(t, suite, registryAddr, digest, true)
 
 		// Wait for the EnvoyExtensionPolicy to be accepted
-		ancestorRef := gwapiv1a2.ParentReference{
+		ancestorRef := gwapiv1.ParentReference{
 			Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
 			Kind:      gatewayapi.KindPtr(resource.KindGateway),
 			Namespace: gatewayapi.NamespacePtr(testNS),
@@ -101,7 +98,7 @@ var OCIWasmTest = suite.ConformanceTest{
 			// Wait for the HTTPRoute to be accepted
 			routeNN := types.NamespacedName{Name: httpRouteWithWasm, Namespace: testNS}
 			gwNN := types.NamespacedName{Name: testGW, Namespace: testNS}
-			gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+			gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
 			// Make a request to the gateway and expect the wasm filter to add a response header
 			expectedResponse := http.ExpectedResponse{
@@ -126,7 +123,7 @@ var OCIWasmTest = suite.ConformanceTest{
 				Namespace: "",
 
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 					Headers: map[string]string{
 						"x-wasm-custom": "FOO", // response header added by wasm
 					},
@@ -147,7 +144,7 @@ var OCIWasmTest = suite.ConformanceTest{
 			ns := testNS
 			routeNN := types.NamespacedName{Name: httpRouteWithoutWasm, Namespace: ns}
 			gwNN := types.NamespacedName{Name: testGW, Namespace: ns}
-			gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+			gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
 
 			expectedResponse := http.ExpectedResponse{
 				Request: http.Request{
@@ -155,7 +152,7 @@ var OCIWasmTest = suite.ConformanceTest{
 					Path: "/no-wasm",
 				},
 				Response: http.Response{
-					StatusCode:    200,
+					StatusCodes:   []int{200},
 					AbsentHeaders: []string{"x-wasm-custom"},
 				},
 				Namespace: ns,
@@ -178,7 +175,7 @@ var OCIWasmTest = suite.ConformanceTest{
 			}()
 
 			// Wait for the EnvoyExtensionPolicy to be failed due to missing pull secret
-			ancestorRef := gwapiv1a2.ParentReference{
+			ancestorRef := gwapiv1.ParentReference{
 				Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
 				Kind:      gatewayapi.KindPtr(resource.KindGateway),
 				Namespace: gatewayapi.NamespacePtr(testNS),
@@ -213,7 +210,7 @@ var OCIWasmTest = suite.ConformanceTest{
 			}()
 
 			// Wait for the EnvoyExtensionPolicy to be failed due to missing pull secret
-			ancestorRef := gwapiv1a2.ParentReference{
+			ancestorRef := gwapiv1.ParentReference{
 				Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
 				Kind:      gatewayapi.KindPtr(resource.KindGateway),
 				Namespace: gatewayapi.NamespacePtr(testNS),
@@ -234,35 +231,35 @@ func pushWasmImageForTest(t *testing.T, suite *suite.ConformanceTestSuite, regis
 	podReady := corev1.PodCondition{Type: corev1.PodReady, Status: corev1.ConditionTrue}
 	WaitForPods(
 		t, suite.Client, testNS,
-		map[string]string{"app": "oci-registry"}, corev1.PodRunning, podReady)
+		map[string]string{"app": "oci-registry"}, corev1.PodRunning, &podReady)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*120)
 	defer cancel()
 
 	var (
 		cli    *client.Client
-		tar    io.Reader
-		res    dockertypes.ImageBuildResponse
+		res    client.ImageBuildResult
 		digest v1.Hash
 		err    error
 	)
 
 	tag := fmt.Sprintf("%s/testwasm:v1.0.0", registryAddr)
 
-	if cli, err = client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation()); err != nil {
+	if cli, err = client.New(client.FromEnv); err != nil {
 		t.Fatalf("failed to create docker client: %v", err)
 	}
 
-	if tar, err = archive.TarWithOptions("testdata/wasm", &archive.TarOptions{}); err != nil {
+	buildContext, err := goarchive.TarWithOptions("testdata/wasm", &goarchive.TarOptions{})
+	if err != nil {
 		t.Fatalf("failed to create tar: %v", err)
 	}
 
-	opts := dockertypes.ImageBuildOptions{
+	opts := client.ImageBuildOptions{
 		Dockerfile: "Dockerfile",
 		Tags:       []string{tag},
 		Remove:     true,
 	}
-	if res, err = cli.ImageBuild(ctx, tar, opts); err != nil {
+	if res, err = cli.ImageBuild(ctx, buildContext, opts); err != nil {
 		t.Fatalf("failed to build image: %v", err)
 	}
 	defer func() {
@@ -381,9 +378,9 @@ func createEEPForWasmTest(
 		},
 		Spec: egv1a1.EnvoyExtensionPolicySpec{
 			PolicyTargetReferences: egv1a1.PolicyTargetReferences{
-				TargetRefs: []gwapiv1a2.LocalPolicyTargetReferenceWithSectionName{
+				TargetRefs: []gwapiv1.LocalPolicyTargetReferenceWithSectionName{
 					{
-						LocalPolicyTargetReference: gwapiv1a2.LocalPolicyTargetReference{
+						LocalPolicyTargetReference: gwapiv1.LocalPolicyTargetReference{
 							Group: "gateway.networking.k8s.io",
 							Kind:  "HTTPRoute",
 							Name:  httpRouteWithWasm,
@@ -394,8 +391,8 @@ func createEEPForWasmTest(
 
 			Wasm: []egv1a1.Wasm{
 				{
-					Name:   ptr.To("wasm-filter"),
-					RootID: ptr.To("my_root_id"),
+					Name:   new("wasm-filter"),
+					RootID: new("my_root_id"),
 					Code: egv1a1.WasmCodeSource{
 						Type: egv1a1.ImageWasmCodeSourceType,
 						Image: &egv1a1.ImageWasmCodeSource{

@@ -10,7 +10,6 @@
       resourceApiVersion: V3
     serviceName: first-route-dest/backend/0
   ignoreHealthOnHostRemoval: true
-  lbPolicy: LEAST_REQUEST
   loadBalancingPolicy:
     policies:
     - typedExtensionConfig:
@@ -28,13 +27,21 @@
   commonLbConfig: {}
   connectTimeout: 10s
   dnsLookupFamily: V4_PREFERRED
-  edsClusterConfig:
-    edsConfig:
-      ads: {}
-      resourceApiVersion: V3
-    serviceName: first-route-dest/backend/1
+  dnsRefreshRate: 30s
   ignoreHealthOnHostRemoval: true
-  lbPolicy: LEAST_REQUEST
+  loadAssignment:
+    clusterName: first-route-dest/backend/1
+    endpoints:
+    - lbEndpoints:
+      - endpoint:
+          address:
+            socketAddress:
+              address: example.com
+              portValue: 50000
+        loadBalancingWeight: 1
+      loadBalancingWeight: 1
+      locality:
+        region: first-route-dest/backend/1
   loadBalancingPolicy:
     policies:
     - typedExtensionConfig:
@@ -45,4 +52,5 @@
             localityWeightedLbConfig: {}
   name: first-route-dest/backend/1
   perConnectionBufferLimitBytes: 32768
-  type: EDS
+  respectDnsTtl: true
+  type: STRICT_DNS

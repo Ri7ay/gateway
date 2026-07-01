@@ -6,13 +6,17 @@
 package v1alpha1
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-const OIDCClientSecretKey = "client-secret"
+const (
+	OIDCClientSecretKey = "client-secret"
+	OIDCClientIDKey     = "client-id"
+)
 
 // OIDC defines the configuration for the OpenID Connect (OIDC) authentication.
+// +kubebuilder:validation:XValidation:rule="(has(self.clientID) && !has(self.clientIDRef)) || (!has(self.clientID) && has(self.clientIDRef))", message="only one of clientID or clientIDRef must be set"
+// +kubebuilder:validation:XValidation:rule="!(has(self.forwardAccessToken) && self.forwardAccessToken && has(self.forwardIDToken) && self.forwardIDToken.header.lowerAscii() == 'authorization')", message="forwardAccessToken cannot be true when forwardIDToken.header is Authorization"
 type OIDC struct {
 	// The OIDC Provider configuration.
 	Provider OIDCProvider `json:"provider"`
@@ -20,8 +24,20 @@ type OIDC struct {
 	// The client ID to be used in the OIDC
 	// [Authentication Request](https://openid.net/specs/openid-connect-core-1_0.html#AuthRequest).
 	//
+	// Only one of clientID or clientIDRef must be set.
+	// +optional
 	// +kubebuilder:validation:MinLength=1
-	ClientID string `json:"clientID"`
+	ClientID *string `json:"clientID,omitempty"`
+
+	// The Kubernetes secret which contains the client ID to be used in the
+	// [Authentication Request](https://openid.net/specs/openid-connect-core-1_0.html#AuthRequest).
+	// Exactly one of clientID or clientIDRef must be set.
+	// This is an Opaque secret. The client ID should be stored in the key "client-id".
+	//
+	// Only one of clientID or clientIDRef must be set.
+	//
+	// +optional
+	ClientIDRef *gwapiv1.SecretObjectReference `json:"clientIDRef,omitempty"`
 
 	// The Kubernetes secret which contains the OIDC client secret to be used in the
 	// [Authentication Request](https://openid.net/specs/openid-connect-core-1_0.html#AuthRequest).
@@ -84,6 +100,15 @@ type OIDC struct {
 	// +optional
 	ForwardAccessToken *bool `json:"forwardAccessToken,omitempty"`
 
+	// ForwardIDToken configures forwarding of the OIDC ID token to the upstream.
+	//
+	// If the configured header is "Authorization", EG forwards the ID token using
+	// the "Bearer " prefix. For any other header, EG forwards the raw token value.
+	// If not specified, the ID token will not be forwarded.
+	// +optional
+	// +notImplementedHide
+	ForwardIDToken *OIDCTokenForwarding `json:"forwardIDToken,omitempty"`
+
 	// DefaultTokenTTL is the default lifetime of the id token and access token.
 	// Please note that Envoy will always use the expiry time from the response
 	// of the authorization server if it is provided. This field is only used when
@@ -94,14 +119,15 @@ type OIDC struct {
 	// OAuth flow will fail.
 	//
 	// +optional
-	DefaultTokenTTL *metav1.Duration `json:"defaultTokenTTL,omitempty"`
+	DefaultTokenTTL *gwapiv1.Duration `json:"defaultTokenTTL,omitempty"`
 
 	// RefreshToken indicates whether the Envoy should automatically refresh the
 	// id token and access token when they expire.
 	// When set to true, the Envoy will use the refresh token to get a new id token
 	// and access token when they expire.
 	//
-	// If not specified, defaults to false.
+	// If not specified, defaults to true.
+	// +kubebuilder:default=true
 	// +optional
 	RefreshToken *bool `json:"refreshToken,omitempty"`
 
@@ -111,8 +137,25 @@ type OIDC struct {
 	//
 	// If not specified, defaults to 604800s (one week).
 	// Note: this field is only applicable when the "refreshToken" field is set to true.
+	//
 	// +optional
-	DefaultRefreshTokenTTL *metav1.Duration `json:"defaultRefreshTokenTTL,omitempty"`
+	DefaultRefreshTokenTTL *gwapiv1.Duration `json:"defaultRefreshTokenTTL,omitempty"`
+
+	// CSRFTokenTTL defines how long the CSRF token generated during the OAuth2 authorization flow remains valid.
+	//
+	// This duration determines the lifetime of the CSRF cookie, which is validated against the CSRF token
+	// in the "state" parameter when the provider redirects back to the callback endpoint.
+	//
+	// If omitted, Envoy Gateway defaults the token expiration to 10 minutes.
+	//
+	// +optional
+	CSRFTokenTTL *gwapiv1.Duration `json:"csrfTokenTTL,omitempty"`
+
+	// Disable token encryption. When set to true, both the access token and the ID token will be stored in plain text.
+	// This option should only be used in secure environments where token encryption is not required.
+	// Default is false (tokens are encrypted).
+	// +optional
+	DisableTokenEncryption *bool `json:"disableTokenEncryption,omitempty"`
 
 	// Skips OIDC authentication when the request contains a header that will be extracted by the JWT filter. Unless
 	// explicitly stated otherwise in the extractFrom field, this will be the "Authorization: Bearer ..." header.
@@ -126,19 +169,19 @@ type OIDC struct {
 }
 
 // OIDCProvider defines the OIDC Provider configuration.
+//
+// BackendRefs is used to specify the address of the OIDC Provider.
+// If the BackendRefs is not specified, The host and port of the OIDC Provider's token endpoint
+// will be used as the address of the OIDC Provider.
+//
+// TLS configuration can be specified in a BackendTLSConfig resource and target the BackendRefs.
+//
+// Other settings for the connection to the OIDC Provider can be specified in the BackendSettings resource.
+//
 // +kubebuilder:validation:XValidation:rule="!has(self.backendRef)",message="BackendRefs must be used, backendRef is not supported."
 // +kubebuilder:validation:XValidation:rule="has(self.backendSettings)? (has(self.backendSettings.retry)?(has(self.backendSettings.retry.perRetry)? !has(self.backendSettings.retry.perRetry.timeout):true):true):true",message="Retry timeout is not supported."
 // +kubebuilder:validation:XValidation:rule="has(self.backendSettings)? (has(self.backendSettings.retry)?(has(self.backendSettings.retry.retryOn)? !has(self.backendSettings.retry.retryOn.httpStatusCodes):true):true):true",message="HTTPStatusCodes is not supported."
 type OIDCProvider struct {
-	// BackendRefs is used to specify the address of the OIDC Provider.
-	// If the BackendRefs is not specified, The host and port of the OIDC Provider's token endpoint
-	// will be used as the address of the OIDC Provider.
-	//
-	// TLS configuration can be specified in a BackendTLSConfig resource and target the BackendRefs.
-	//
-	// Other settings for the connection to the OIDC Provider can be specified in the BackendSettings resource.
-	// Currently, only the retry policy is supported.
-	//
 	// +optional
 	BackendCluster `json:",inline"`
 
@@ -201,6 +244,13 @@ type OIDCCookieNames struct {
 	IDToken *string `json:"idToken,omitempty"`
 }
 
+// OIDCTokenForwarding defines how an OIDC token is forwarded upstream.
+type OIDCTokenForwarding struct {
+	// Header is the upstream request header that will carry the ID token.
+	// +kubebuilder:validation:MinLength=1
+	Header string `json:"header"`
+}
+
 type SameSite string
 
 const (
@@ -216,6 +266,5 @@ const (
 type OIDCCookieConfig struct {
 	// +optional
 	// +kubebuilder:validation:Enum=Lax;Strict;None
-	// +kubebuilder:default=Strict
 	SameSite *string `json:"sameSite,omitempty"`
 }

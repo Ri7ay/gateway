@@ -2,7 +2,6 @@ gateways:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: Gateway
   metadata:
-    creationTimestamp: null
     name: gateway-1
     namespace: envoy-gateway
   spec:
@@ -17,9 +16,7 @@ gateways:
       protocol: HTTPS
       tls:
         certificateRefs:
-        - group: null
-          kind: null
-          name: tls-secret-example-com
+        - name: tls-secret-example-com
         mode: Terminate
   status:
     listeners:
@@ -42,9 +39,7 @@ gateways:
         type: ResolvedRefs
       - lastTransitionTime: null
         message: The hostname foo.example.com overlaps with the hostname *.example.com
-          in listener https-1 of gateway gateway-2. ALPN will default to HTTP/1.1
-          to prevent HTTP/2 connection coalescing, unless explicitly configured via
-          ClientTrafficPolicy
+          in listener https-1 of gateway gateway-2.
         reason: OverlappingHostnames
         status: "True"
         type: OverlappingTLSConfig
@@ -57,7 +52,6 @@ gateways:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: Gateway
   metadata:
-    creationTimestamp: null
     name: gateway-2
     namespace: envoy-gateway
   spec:
@@ -72,9 +66,7 @@ gateways:
       protocol: HTTPS
       tls:
         certificateRefs:
-        - group: null
-          kind: null
-          name: tls-secret-example-com
+        - name: tls-secret-example-com
         mode: Terminate
     - allowedRoutes:
         namespaces:
@@ -85,9 +77,7 @@ gateways:
       protocol: HTTPS
       tls:
         certificateRefs:
-        - group: null
-          kind: null
-          name: tls-secret-foo-bar-com
+        - name: tls-secret-foo-bar-com
         mode: Terminate
   status:
     listeners:
@@ -110,9 +100,7 @@ gateways:
         type: ResolvedRefs
       - lastTransitionTime: null
         message: The hostname *.example.com overlaps with the hostname foo.example.com
-          in listener https-1 of gateway gateway-1. ALPN will default to HTTP/1.1
-          to prevent HTTP/2 connection coalescing, unless explicitly configured via
-          ClientTrafficPolicy
+          in listener https-1 of gateway gateway-1.
         reason: OverlappingHostnames
         status: "True"
         type: OverlappingTLSConfig
@@ -149,7 +137,6 @@ httpRoutes:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: HTTPRoute
   metadata:
-    creationTimestamp: null
     name: httproute-1
     namespace: envoy-gateway
   spec:
@@ -187,7 +174,6 @@ infraIR:
         apiVersion: gateway.envoyproxy.io/v1alpha1
         kind: EnvoyProxy
         metadata:
-          creationTimestamp: null
           name: test
           namespace: envoy-gateway-system
         spec:
@@ -195,8 +181,7 @@ infraIR:
           mergeGateways: true
         status: {}
       listeners:
-      - address: null
-        name: envoy-gateway/gateway-1/https-1
+      - name: envoy-gateway/gateway-1/https-1
         ports:
         - containerPort: 10443
           name: https-443
@@ -215,11 +200,32 @@ xdsIR:
     accessLog:
       json:
       - path: /dev/stdout
+    globalResources:
+      proxyServiceCluster:
+        metadata:
+          kind: Service
+          name: envoy-envoy-gateway-class-3b1df594
+          namespace: envoy-gateway-system
+          sectionName: "8080"
+        name: envoy-gateway-class
+        settings:
+        - addressType: IP
+          endpoints:
+          - host: 7.6.5.4
+            port: 8080
+            zone: zone1
+          metadata:
+            kind: Service
+            name: envoy-envoy-gateway-class-3b1df594
+            namespace: envoy-gateway-system
+            sectionName: "8080"
+          name: envoy-gateway-class
+          protocol: TCP
     http:
     - address: 0.0.0.0
+      externalPort: 443
       hostnames:
       - foo.example.com
-      isHTTP2: false
       metadata:
         kind: Gateway
         name: gateway-1
@@ -267,11 +273,10 @@ xdsIR:
         - certificate: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUMyRENDQWNBQ0FRQXdEUVlKS29aSWh2Y05BUUVMQlFBd0xURVZNQk1HQTFVRUNnd01aWGhoYlhCc1pTQkoKYm1NdU1SUXdFZ1lEVlFRRERBdGxlR0Z0Y0d4bExtTnZiVEFlRncweU5UQTBNakV3T1RFd05ETmFGdzB6TlRBMApNVGt3T1RFd05ETmFNRGN4RmpBVUJnTlZCQU1NRFNvdVpYaGhiWEJzWlM1amIyMHhIVEFiQmdOVkJBb01GR1Y0CllXMXdiR1VnYjNKbllXNXBlbUYwYVc5dU1JSUJJakFOQmdrcWhraUc5dzBCQVFFRkFBT0NBUThBTUlJQkNnS0MKQVFFQXY0anl4TUh1YzQzMHdvWkk4M1JSMXVxU2gvbm9MVWVPdDZnMkNKaFVFYXNaeUNOMzN3bFRRRDE0SEhkSwpOb1k4SThWd1pOZFZCNGpjRzlnb3dDVmVQY3lqRzZPaGl1aUZNWnU2NzV6dWZEWnRlRTNEY3lTbFgrY2lSbVZZCkNuSmk3QkV3NlJMUUJ0bVV6WGxtYmRpVXE5djJwalVBL2R3ZnRLRHRZTHFrVytvTSt5MWg3cjRJV0JVK2RVcU0KcGtTem5VSCtKN1JoRkFsdytmRWlVSFRLemlCMkVtdjc3Mi91bS96NHdMWnJIeWNGbmc4L1FCM0JIUktXVTV4eQp3bWNTQ2xrVlMvWWNpMFVXcnR2eGhwck9wTUhQUGR2QkZ2M2NaWGNpUUJjb0ZNcGxsQzV0UURvdWJ0dEV1d3JpCi8rVktKWkUrSVl4ei9YeUd3Y3dJRnIzWG13SURBUUFCTUEwR0NTcUdTSWIzRFFFQkN3VUFBNElCQVFBU3VLaE8KcGtwL1VSclphbEU0OUlnc0xkN3hSTlBhREVkQ1RWZ3Qvc3praUhnSDB1NDBVaVV6KzVzaDRpdlJOazRqTm1zRwprb3FwQlBVS3pvVmtrSTcxUWQ4bHh1VzF2dkxZMXVvM0RIS2svdDFpUWVZWWpERlk3YzUxVG1BT015WUdKTlhxCi9EbW84UWgzaFB1RnI3a29kUjBLSkJyc0RsMEhoWVBjUnpWOW1sQ2lrU1B4THJGTUNwZGx0QUw2UEprSVpucUgKc1g5dEtVZk1uYW5jMkpHZTZVTDE1ODBEV2xQTUcrMU1qRElCVXdxWWYzaWNKb0NYclAwbzNmckRKcTE2VnpidApkalRtVGswakx1bGkvQ2JCZzh4dWp4emo4bmRPcVNkd05kd091OWoxSmZ2Q0I1RjZ4S0VTenowOVo5TzlOZUM5CjMrd1pLTlRSOXVEdDRKNksKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
           name: envoy-gateway/tls-secret-example-com
           privateKey: '[redacted]'
-      tlsOverlaps: true
     - address: 0.0.0.0
+      externalPort: 443
       hostnames:
       - '*.example.com'
-      isHTTP2: false
       metadata:
         kind: Gateway
         name: gateway-2
@@ -288,11 +293,10 @@ xdsIR:
         - certificate: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUMyRENDQWNBQ0FRQXdEUVlKS29aSWh2Y05BUUVMQlFBd0xURVZNQk1HQTFVRUNnd01aWGhoYlhCc1pTQkoKYm1NdU1SUXdFZ1lEVlFRRERBdGxlR0Z0Y0d4bExtTnZiVEFlRncweU5UQTBNakV3T1RFd05ETmFGdzB6TlRBMApNVGt3T1RFd05ETmFNRGN4RmpBVUJnTlZCQU1NRFNvdVpYaGhiWEJzWlM1amIyMHhIVEFiQmdOVkJBb01GR1Y0CllXMXdiR1VnYjNKbllXNXBlbUYwYVc5dU1JSUJJakFOQmdrcWhraUc5dzBCQVFFRkFBT0NBUThBTUlJQkNnS0MKQVFFQXY0anl4TUh1YzQzMHdvWkk4M1JSMXVxU2gvbm9MVWVPdDZnMkNKaFVFYXNaeUNOMzN3bFRRRDE0SEhkSwpOb1k4SThWd1pOZFZCNGpjRzlnb3dDVmVQY3lqRzZPaGl1aUZNWnU2NzV6dWZEWnRlRTNEY3lTbFgrY2lSbVZZCkNuSmk3QkV3NlJMUUJ0bVV6WGxtYmRpVXE5djJwalVBL2R3ZnRLRHRZTHFrVytvTSt5MWg3cjRJV0JVK2RVcU0KcGtTem5VSCtKN1JoRkFsdytmRWlVSFRLemlCMkVtdjc3Mi91bS96NHdMWnJIeWNGbmc4L1FCM0JIUktXVTV4eQp3bWNTQ2xrVlMvWWNpMFVXcnR2eGhwck9wTUhQUGR2QkZ2M2NaWGNpUUJjb0ZNcGxsQzV0UURvdWJ0dEV1d3JpCi8rVktKWkUrSVl4ei9YeUd3Y3dJRnIzWG13SURBUUFCTUEwR0NTcUdTSWIzRFFFQkN3VUFBNElCQVFBU3VLaE8KcGtwL1VSclphbEU0OUlnc0xkN3hSTlBhREVkQ1RWZ3Qvc3praUhnSDB1NDBVaVV6KzVzaDRpdlJOazRqTm1zRwprb3FwQlBVS3pvVmtrSTcxUWQ4bHh1VzF2dkxZMXVvM0RIS2svdDFpUWVZWWpERlk3YzUxVG1BT015WUdKTlhxCi9EbW84UWgzaFB1RnI3a29kUjBLSkJyc0RsMEhoWVBjUnpWOW1sQ2lrU1B4THJGTUNwZGx0QUw2UEprSVpucUgKc1g5dEtVZk1uYW5jMkpHZTZVTDE1ODBEV2xQTUcrMU1qRElCVXdxWWYzaWNKb0NYclAwbzNmckRKcTE2VnpidApkalRtVGswakx1bGkvQ2JCZzh4dWp4emo4bmRPcVNkd05kd091OWoxSmZ2Q0I1RjZ4S0VTenowOVo5TzlOZUM5CjMrd1pLTlRSOXVEdDRKNksKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
           name: envoy-gateway/tls-secret-example-com
           privateKey: '[redacted]'
-      tlsOverlaps: true
     - address: 0.0.0.0
+      externalPort: 443
       hostnames:
       - foo.bar.com
-      isHTTP2: false
       metadata:
         kind: Gateway
         name: gateway-2

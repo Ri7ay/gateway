@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	clusterV3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	coreV3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -20,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/structpb"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	pb "github.com/envoyproxy/gateway/proto/extension"
@@ -161,7 +163,6 @@ func (t *testingExtensionServer) PostClusterModify(_ context.Context, req *pb.Po
 
 			modifiedCluster.EdsClusterConfig = nil
 			modifiedCluster.LoadAssignment = nil
-			modifiedCluster.LbPolicy = clusterV3.Cluster_CLUSTER_PROVIDED
 			modifiedCluster.CommonLbConfig = nil
 			modifiedCluster.ClusterDiscoveryType = &clusterV3.Cluster_Type{Type: clusterV3.Cluster_ORIGINAL_DST}
 			poolCount++
@@ -170,6 +171,26 @@ func (t *testingExtensionServer) PostClusterModify(_ context.Context, req *pb.Po
 
 	return &pb.PostClusterModifyResponse{
 		Cluster: modifiedCluster,
+	}, nil
+}
+
+func (t *testingExtensionServer) PostEndpointsModify(_ context.Context, req *pb.PostEndpointsModifyRequest) (*pb.PostEndpointsModifyResponse, error) {
+	for _, endpoint := range req.LoadAssignment.Endpoints {
+		for _, lbEndpoint := range endpoint.LbEndpoints {
+			lbEndpoint.Metadata = &coreV3.Metadata{
+				FilterMetadata: map[string]*structpb.Struct{
+					"envoy-gateway.extension": {
+						Fields: map[string]*structpb.Value{
+							"hook": structpb.NewStringValue("applied"),
+						},
+					},
+				},
+			}
+		}
+	}
+
+	return &pb.PostEndpointsModifyResponse{
+		LoadAssignment: req.LoadAssignment,
 	}, nil
 }
 
@@ -259,21 +280,25 @@ func (t *testingExtensionServer) PostHTTPListenerModify(_ context.Context, req *
 	}, nil
 }
 
-// PostTranslateModifyHook inserts and overrides some clusters/secrets
+// PostTranslateModifyHook inserts and overrides some clusters/secrets/listeners/routes
 func (t *testingExtensionServer) PostTranslateModify(_ context.Context, req *pb.PostTranslateModifyRequest) (*pb.PostTranslateModifyResponse, error) {
 	for _, cluster := range req.Clusters {
 		if cluster.Name == "custom-backend-dest" {
 			return &pb.PostTranslateModifyResponse{
-				Clusters: req.Clusters,
-				Secrets:  req.Secrets,
+				Clusters:  req.Clusters,
+				Secrets:   req.Secrets,
+				Listeners: req.Listeners,
+				Routes:    req.Routes,
 			}, nil
 		}
 		// This simulates an extension server that returns an error. It allows verifying that fail-close is working.
 		if edsConfig := cluster.GetEdsClusterConfig(); edsConfig != nil {
 			if strings.Contains(edsConfig.ServiceName, "fail-close-error") {
 				return &pb.PostTranslateModifyResponse{
-					Clusters: req.Clusters,
-					Secrets:  req.Secrets,
+					Clusters:  req.Clusters,
+					Secrets:   req.Secrets,
+					Listeners: req.Listeners,
+					Routes:    req.Routes,
 				}, fmt.Errorf("cluster hook resource error: %s", edsConfig.ServiceName)
 			}
 		}
@@ -296,13 +321,15 @@ func (t *testingExtensionServer) PostTranslateModify(_ context.Context, req *pb.
 	}
 
 	response := &pb.PostTranslateModifyResponse{
-		Clusters: make([]*clusterV3.Cluster, len(req.Clusters)),
-		Secrets:  make([]*tlsV3.Secret, len(req.Secrets)),
+		Clusters:  make([]*clusterV3.Cluster, len(req.Clusters)),
+		Secrets:   make([]*tlsV3.Secret, len(req.Secrets)),
+		Listeners: make([]*listenerV3.Listener, len(req.Listeners)),
+		Routes:    make([]*routeV3.RouteConfiguration, len(req.Routes)),
 	}
 	for idx, cluster := range req.Clusters {
 		response.Clusters[idx] = proto.Clone(cluster).(*clusterV3.Cluster)
 		if cluster.Name == "first-route" {
-			response.Clusters[idx].ConnectTimeout = &durationpb.Duration{Seconds: 30}
+			response.Clusters[idx].ConnectTimeout = durationpb.New(time.Second * 30)
 		}
 	}
 
@@ -396,6 +423,61 @@ func (t *testingExtensionServer) PostTranslateModify(_ context.Context, req *pb.
 			},
 		},
 	})
+
+	// Process listeners - clone and potentially modify them
+	for idx, listener := range req.Listeners {
+		response.Listeners[idx] = proto.Clone(listener).(*listenerV3.Listener)
+		// Example: Modify listener for testing - add a stat prefix if listener name matches
+		if listener.Name == "test-listener-modify" {
+			response.Listeners[idx].StatPrefix = "extension-modified-listener"
+		}
+	}
+
+	// Process routes - clone and potentially modify them
+	for idx, route := range req.Routes {
+		response.Routes[idx] = proto.Clone(route).(*routeV3.RouteConfiguration)
+		// Example: Modify route for testing - add metadata if route name matches
+		if route.Name == "test-route-modify" {
+			if response.Routes[idx].ResponseHeadersToAdd == nil {
+				response.Routes[idx].ResponseHeadersToAdd = []*coreV3.HeaderValueOption{}
+			}
+			response.Routes[idx].ResponseHeadersToAdd = append(response.Routes[idx].ResponseHeadersToAdd,
+				&coreV3.HeaderValueOption{
+					Header: &coreV3.HeaderValue{
+						Key:   "x-extension-modified",
+						Value: "true",
+					},
+				})
+		}
+	}
+
+	// Only inject new resources for specific test cases to avoid breaking existing tests
+	for _, policy := range req.PostTranslateContext.ExtensionResources {
+		extensionResource := unstructured.Unstructured{}
+		if err := extensionResource.UnmarshalJSON(policy.UnstructuredBytes); err == nil {
+			if extensionResource.GetObjectKind().GroupVersionKind().Kind == "ExampleExtPolicy" {
+				// Example: Add a new listener for testing
+				response.Listeners = append(response.Listeners, &listenerV3.Listener{
+					Name:       "extension-injected-listener",
+					StatPrefix: "extension-injected",
+				})
+
+				// Example: Add a new route for testing
+				response.Routes = append(response.Routes, &routeV3.RouteConfiguration{
+					Name: "extension-injected-route",
+					ResponseHeadersToAdd: []*coreV3.HeaderValueOption{
+						{
+							Header: &coreV3.HeaderValue{
+								Key:   "x-extension-injected",
+								Value: "route",
+							},
+						},
+					},
+				})
+				break
+			}
+		}
+	}
 
 	return response, nil
 }

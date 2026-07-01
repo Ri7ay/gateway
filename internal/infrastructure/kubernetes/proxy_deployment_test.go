@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -25,6 +24,7 @@ import (
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/proxy"
 	resource2 "github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/resource"
 	"github.com/envoyproxy/gateway/internal/ir"
+	"github.com/envoyproxy/gateway/internal/message"
 )
 
 const (
@@ -34,8 +34,8 @@ const (
 
 func deploymentWithImage(deploy *appsv1.Deployment, image string) *appsv1.Deployment {
 	dCopy := deploy.DeepCopy()
-	for i, c := range dCopy.Spec.Template.Spec.Containers {
-		if c.Name == envoyContainerName {
+	for i := range dCopy.Spec.Template.Spec.Containers {
+		if dCopy.Spec.Template.Spec.Containers[i].Name == envoyContainerName {
 			dCopy.Spec.Template.Spec.Containers[i].Image = image
 		}
 	}
@@ -53,9 +53,9 @@ func deploymentWithSelectorAndLabel(deploy *appsv1.Deployment, selector *metav1.
 	return dCopy
 }
 
-func setupCreateOrUpdateProxyDeployment(gatewayNamespaceMode bool) (*appsv1.Deployment, *ir.Infra, *config.Server, error) {
+func setupCreateOrUpdateProxyDeployment(t *testing.T, gatewayNamespaceMode bool) (*appsv1.Deployment, *ir.Infra, *config.Server, error) {
 	ctx := context.Background()
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -70,14 +70,15 @@ func setupCreateOrUpdateProxyDeployment(gatewayNamespaceMode bool) (*appsv1.Depl
 	cli := fakeclient.NewClientBuilder().
 		WithScheme(envoygateway.GetScheme()).
 		Build()
-	kube := NewInfra(cli, cfg)
+	errorNotifier := message.RunnerErrorNotifier{RunnerName: t.Name(), RunnerErrors: &message.RunnerErrors{}}
+	kube := NewInfra(cli, cfg, errorNotifier)
 	if err := setupOwnerReferenceResources(ctx, kube.Client); err != nil {
 		return nil, nil, nil, err
 	}
 
 	if gatewayNamespaceMode {
 		cfg.EnvoyGateway.Provider.Kubernetes.Deploy = &egv1a1.KubernetesDeployMode{
-			Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+			Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 		}
 		infra.Proxy.Name = "gateway-1"
 		infra.Proxy.Namespace = "ns1"
@@ -101,10 +102,10 @@ func setupCreateOrUpdateProxyDeployment(gatewayNamespaceMode bool) (*appsv1.Depl
 }
 
 func TestCreateOrUpdateProxyDeployment(t *testing.T) {
-	deploy, infra, cfg, err := setupCreateOrUpdateProxyDeployment(false)
+	deploy, infra, cfg, err := setupCreateOrUpdateProxyDeployment(t, false)
 	require.NoError(t, err)
 
-	gwDeploy, gwInfra, gwCfg, err := setupCreateOrUpdateProxyDeployment(true)
+	gwDeploy, gwInfra, gwCfg, err := setupCreateOrUpdateProxyDeployment(t, true)
 	require.NoError(t, err)
 
 	testCases := []struct {
@@ -147,11 +148,11 @@ func TestCreateOrUpdateProxyDeployment(t *testing.T) {
 					Config: &egv1a1.EnvoyProxy{
 						Spec: egv1a1.EnvoyProxySpec{
 							Provider: &egv1a1.EnvoyProxyProvider{
-								Type: egv1a1.ProviderTypeKubernetes,
+								Type: egv1a1.EnvoyProxyProviderTypeKubernetes,
 								Kubernetes: &egv1a1.EnvoyProxyKubernetesProvider{
 									EnvoyDeployment: &egv1a1.KubernetesDeploymentSpec{
 										Container: &egv1a1.KubernetesContainerSpec{
-											Image: ptr.To("envoyproxy/envoy-dev:v1.2.3"),
+											Image: new("envoyproxy/envoy-dev:v1.2.3"),
 										},
 									},
 								},
@@ -183,7 +184,7 @@ func TestCreateOrUpdateProxyDeployment(t *testing.T) {
 					Config: &egv1a1.EnvoyProxy{
 						Spec: egv1a1.EnvoyProxySpec{
 							Provider: &egv1a1.EnvoyProxyProvider{
-								Type: egv1a1.ProviderTypeKubernetes,
+								Type: egv1a1.EnvoyProxyProviderTypeKubernetes,
 								Kubernetes: &egv1a1.EnvoyProxyKubernetesProvider{
 									EnvoyDeployment: &egv1a1.KubernetesDeploymentSpec{
 										Pod: &egv1a1.KubernetesPodSpec{
@@ -222,7 +223,7 @@ func TestCreateOrUpdateProxyDeployment(t *testing.T) {
 					Config: &egv1a1.EnvoyProxy{
 						Spec: egv1a1.EnvoyProxySpec{
 							Provider: &egv1a1.EnvoyProxyProvider{
-								Type: egv1a1.ProviderTypeKubernetes,
+								Type: egv1a1.EnvoyProxyProviderTypeKubernetes,
 								Kubernetes: &egv1a1.EnvoyProxyKubernetesProvider{
 									EnvoyDeployment: &egv1a1.KubernetesDeploymentSpec{
 										Pod: &egv1a1.KubernetesPodSpec{
@@ -264,7 +265,7 @@ func TestCreateOrUpdateProxyDeployment(t *testing.T) {
 					Config: &egv1a1.EnvoyProxy{
 						Spec: egv1a1.EnvoyProxySpec{
 							Provider: &egv1a1.EnvoyProxyProvider{
-								Type: egv1a1.ProviderTypeKubernetes,
+								Type: egv1a1.EnvoyProxyProviderTypeKubernetes,
 								Kubernetes: &egv1a1.EnvoyProxyKubernetesProvider{
 									EnvoyDeployment: &egv1a1.KubernetesDeploymentSpec{
 										Pod: &egv1a1.KubernetesPodSpec{
@@ -313,7 +314,8 @@ func TestCreateOrUpdateProxyDeployment(t *testing.T) {
 					Build()
 			}
 
-			kube := NewInfra(cli, tc.cfg)
+			errorNotifier := message.RunnerErrorNotifier{RunnerName: t.Name(), RunnerErrors: &message.RunnerErrors{}}
+			kube := NewInfra(cli, tc.cfg, errorNotifier)
 			require.NoError(t, setupOwnerReferenceResources(ctx, kube.Client))
 
 			r, err := proxy.NewResourceRender(ctx, kube, tc.in)
@@ -344,7 +346,7 @@ func TestDeleteProxyDeployment(t *testing.T) {
 		WithObjects().
 		WithInterceptorFuncs(interceptorFunc).
 		Build()
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	testCases := []struct {
@@ -360,7 +362,8 @@ func TestDeleteProxyDeployment(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			kube := NewInfra(cli, cfg)
+			errorNotifier := message.RunnerErrorNotifier{RunnerName: t.Name(), RunnerErrors: &message.RunnerErrors{}}
+			kube := NewInfra(cli, cfg, errorNotifier)
 			require.NoError(t, setupOwnerReferenceResources(ctx, kube.Client))
 
 			infra := ir.NewInfra()

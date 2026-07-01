@@ -17,8 +17,8 @@ clientTrafficPolicies:
       ecdhCurves:
       - curve1
       ciphers:
-      - cipher1
-      - cipher2
+      - ECDHE-ECDSA-AES128-GCM-SHA256
+      - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
       signatureAlgorithms:
       - sig1
       - sig2

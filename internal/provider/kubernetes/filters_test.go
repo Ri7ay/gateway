@@ -6,7 +6,6 @@
 package kubernetes
 
 import (
-	"context"
 	"os"
 	"testing"
 
@@ -14,7 +13,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -24,8 +22,6 @@ import (
 )
 
 func TestGetExtensionRefFilters(t *testing.T) {
-	ctx := context.Background()
-
 	// Create test extension resources
 	s3Backend := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -87,12 +83,11 @@ func TestGetExtensionRefFilters(t *testing.T) {
 	}
 
 	testCases := []struct {
-		name           string
-		extGVKs        []schema.GroupVersionKind
-		objects        []client.Object
-		namespaceLabel *metav1.LabelSelector
-		expectedCount  int
-		expectedError  bool
+		name          string
+		extGVKs       []schema.GroupVersionKind
+		objects       []client.Object
+		expectedCount int
+		expectedError bool
 	}{
 		{
 			name:          "no extension GVKs configured",
@@ -120,44 +115,12 @@ func TestGetExtensionRefFilters(t *testing.T) {
 			expectedCount: 2,
 			expectedError: false,
 		},
-		{
-			name: "namespace label filtering - include test namespace only",
-			extGVKs: []schema.GroupVersionKind{
-				{Group: "storage.example.io", Version: "v1alpha1", Kind: "S3Backend"},
-				{Group: "compute.example.io", Version: "v1alpha1", Kind: "LambdaBackend"},
-			},
-			objects: []client.Object{s3Backend, lambdaBackend, defaultNamespace, testNamespace},
-			namespaceLabel: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"env": "test",
-				},
-			},
-			expectedCount: 1, // Only lambda-backend in test-ns should be included
-			expectedError: false,
-		},
-		{
-			name: "namespace label filtering - no matching namespaces",
-			extGVKs: []schema.GroupVersionKind{
-				{Group: "storage.example.io", Version: "v1alpha1", Kind: "S3Backend"},
-				{Group: "compute.example.io", Version: "v1alpha1", Kind: "LambdaBackend"},
-			},
-			objects: []client.Object{s3Backend, lambdaBackend, defaultNamespace, testNamespace},
-			namespaceLabel: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"env": "nonexistent",
-				},
-			},
-			expectedCount: 0,
-			expectedError: false,
-		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create fake client with test objects
-			scheme := runtime.NewScheme()
-			require.NoError(t, corev1.AddToScheme(scheme))
-
+			scheme := newTestScheme(tc.extGVKs...)
 			fakeClient := fakeclient.NewClientBuilder().
 				WithScheme(scheme).
 				WithObjects(tc.objects...).
@@ -165,14 +128,13 @@ func TestGetExtensionRefFilters(t *testing.T) {
 
 			// Create reconciler with test configuration
 			r := &gatewayAPIReconciler{
-				extGVKs:        tc.extGVKs,
-				namespaceLabel: tc.namespaceLabel,
-				log:            logging.DefaultLogger(os.Stdout, egv1a1.LogLevelInfo),
-				client:         fakeClient,
+				extGVKs: tc.extGVKs,
+				log:     logging.DefaultLogger(os.Stdout, egv1a1.LogLevelInfo),
+				client:  fakeClient,
 			}
 
 			// Call the function under test
-			result, err := r.getExtensionRefFilters(ctx)
+			result, err := r.getExtensionRefFilters(t.Context())
 
 			// Verify results
 			if tc.expectedError {
@@ -186,8 +148,6 @@ func TestGetExtensionRefFilters(t *testing.T) {
 }
 
 func TestGetExtensionBackendResources(t *testing.T) {
-	ctx := context.Background()
-
 	// Create test custom backend resources
 	s3Backend := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -252,7 +212,6 @@ func TestGetExtensionBackendResources(t *testing.T) {
 		name           string
 		extBackendGVKs []schema.GroupVersionKind
 		objects        []client.Object
-		namespaceLabel *metav1.LabelSelector
 		expectedCount  int
 		expectedError  bool
 	}{
@@ -282,43 +241,12 @@ func TestGetExtensionBackendResources(t *testing.T) {
 			expectedCount: 2,
 			expectedError: false,
 		},
-		{
-			name: "namespace label filtering - include test namespace only",
-			extBackendGVKs: []schema.GroupVersionKind{
-				{Group: "storage.example.io", Version: "v1alpha1", Kind: "S3Backend"},
-				{Group: "compute.example.io", Version: "v1alpha1", Kind: "LambdaBackend"},
-			},
-			objects: []client.Object{s3Backend, lambdaBackend, defaultNamespace, testNamespace},
-			namespaceLabel: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"env": "test",
-				},
-			},
-			expectedCount: 1, // Only lambda-backend in test-ns should be included
-			expectedError: false,
-		},
-		{
-			name: "namespace label filtering - no matching namespaces",
-			extBackendGVKs: []schema.GroupVersionKind{
-				{Group: "storage.example.io", Version: "v1alpha1", Kind: "S3Backend"},
-				{Group: "compute.example.io", Version: "v1alpha1", Kind: "LambdaBackend"},
-			},
-			objects: []client.Object{s3Backend, lambdaBackend, defaultNamespace, testNamespace},
-			namespaceLabel: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"env": "nonexistent",
-				},
-			},
-			expectedCount: 0,
-			expectedError: false,
-		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create fake client with test objects
-			scheme := runtime.NewScheme()
-			require.NoError(t, corev1.AddToScheme(scheme))
+			scheme := newTestScheme(tc.extBackendGVKs...)
 
 			fakeClient := fakeclient.NewClientBuilder().
 				WithScheme(scheme).
@@ -328,13 +256,12 @@ func TestGetExtensionBackendResources(t *testing.T) {
 			// Create reconciler with test configuration
 			r := &gatewayAPIReconciler{
 				extBackendGVKs: tc.extBackendGVKs,
-				namespaceLabel: tc.namespaceLabel,
 				log:            logging.DefaultLogger(os.Stdout, egv1a1.LogLevelInfo),
 				client:         fakeClient,
 			}
 
 			// Call the function under test
-			result, err := r.getExtensionBackendResources(ctx)
+			result, err := r.getExtensionBackendResources(t.Context())
 
 			// Verify results
 			if tc.expectedError {

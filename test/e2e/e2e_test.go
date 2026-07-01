@@ -8,6 +8,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"flag"
 	"io/fs"
 	"os"
@@ -31,18 +32,12 @@ func TestE2E(t *testing.T) {
 
 	c, cfg := kubetest.NewClient(t)
 
-	if flags.RunTest != nil && *flags.RunTest != "" {
-		tlog.Logf(t, "Running E2E test %s with %s GatewayClass\n cleanup: %t\n debug: %t",
-			*flags.RunTest, *flags.GatewayClassName, *flags.CleanupBaseResources, *flags.ShowDebug)
-	} else {
-		tlog.Logf(t, "Running E2E tests with %s GatewayClass\n cleanup: %t\n debug: %t",
-			*flags.GatewayClassName, *flags.CleanupBaseResources, *flags.ShowDebug)
-	}
+	suiteOpts := suite.ConfigurableOptions{}
+	flags.ApplyAll(&suiteOpts)
+	data, _ := json.MarshalIndent(suiteOpts, "", "  ")
+	tlog.Logf(t, "Running E2E tests with options: %s\n", string(data))
 
-	skipTests := []string{
-		tests.GatewayInfraResourceTest.ShortName, // https://github.com/envoyproxy/gateway/issues/3191
-	}
-
+	var skipTests []string
 	// Skip test only work on DualStack cluster
 	if tests.IPFamily != "dual" {
 		skipTests = append(skipTests,
@@ -57,46 +52,62 @@ func TestE2E(t *testing.T) {
 			tests.DynamicResolverBackendTest.ShortName,
 			tests.DynamicResolverBackendWithTLSTest.ShortName,
 			tests.RateLimitCIDRMatchTest.ShortName,
+			tests.RateLimitCIDRInvertMatchAlwaysEnforceTest.ShortName,
+			tests.RateLimitCIDRInvertAlwaysExemptTest.ShortName,
 			tests.RateLimitMultipleListenersTest.ShortName,
 			tests.RateLimitGlobalSharedCidrMatchTest.ShortName,
+			tests.AuthorizationGeoIPCountryTest.ShortName,
 		)
 	}
 
-	// TODO: make these tests work in GatewayNamespaceMode
-	if tests.IsGatewayNamespaceMode() {
+	if tests.XDSNameSchemeV2() {
 		skipTests = append(skipTests,
-			tests.HTTPWasmTest.ShortName,
-			tests.OCIWasmTest.ShortName,
-			tests.ZoneAwareRoutingTest.ShortName,
+			tests.EnvoyPatchPolicyTest.ShortName,
+		)
+	} else {
+		skipTests = append(skipTests,
+			tests.EnvoyPatchPolicyXDSNameSchemeV2Test.ShortName,
 		)
 	}
 
+	enabledFeatures := sets.New(features.SupportGateway)
+	if tests.EnabledClusterTrustBundle() {
+		tlog.Logf(t, "ClusterTrustBundle feature is enabled")
+		enabledFeatures.Insert(tests.ClusterTrustBundleFeature)
+	}
+	// If focusing on a single test, clear the skip list to ensure it runs.
+	if suiteOpts.RunTest != "" {
+		skipTests = nil
+	}
+	suiteOpts.TimeoutConfig = tests.TimeoutConfig()
+	// SupportedFeatures cannot be empty, so we set it to SupportGateway
+	// All e2e tests should leave Features empty.
+	suiteOpts.SupportedFeatures = enabledFeatures.UnsortedList()
+	suiteOpts.SkipTests = skipTests
+	suiteOpts.FailFast = true
 	cSuite, err := suite.NewConformanceTestSuite(suite.ConformanceOptions{
-		Client:               c,
-		RestConfig:           cfg,
-		GatewayClassName:     *flags.GatewayClassName,
-		Debug:                *flags.ShowDebug,
-		CleanupBaseResources: *flags.CleanupBaseResources,
-		ManifestFS:           []fs.FS{Manifests},
-		RunTest:              *flags.RunTest,
-		// SupportedFeatures cannot be empty, so we set it to SupportGateway
-		// All e2e tests should leave Features empty.
-		SupportedFeatures: sets.New(features.SupportGateway),
-		SkipTests:         skipTests,
-		AllowCRDsMismatch: *flags.AllowCRDsMismatch,
-		Hook:              Hook,
+		Client:              c,
+		RestConfig:          cfg,
+		ConfigurableOptions: suiteOpts,
+		ManifestFS:          []fs.FS{Manifests},
+		Hook:                Hook,
 	})
 	if err != nil {
 		t.Fatalf("Failed to create ConformanceTestSuite: %v", err)
 	}
 
-	cSuite.Setup(t, tests.ConformanceTests)
+	recorder := NewTimingRecorder()
+	t.Cleanup(func() {
+		recorder.Report(t)
+	})
+	timedTests := WrapConformanceTestsWithTiming(tests.ConformanceTests, recorder)
+	cSuite.Setup(t, timedTests)
 	if cSuite.RunTest != "" {
 		tlog.Logf(t, "Running E2E test %s", cSuite.RunTest)
 	} else {
 		tlog.Logf(t, "Running %d E2E tests", len(tests.ConformanceTests))
 	}
-	err = cSuite.Run(t, tests.ConformanceTests)
+	err = cSuite.Run(t, timedTests)
 	if err != nil {
 		tlog.Fatalf(t, "Failed to run E2E tests: %v", err)
 	}

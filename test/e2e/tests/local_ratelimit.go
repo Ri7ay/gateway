@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 	"sigs.k8s.io/gateway-api/conformance/utils/http"
 	"sigs.k8s.io/gateway-api/conformance/utils/kubernetes"
 	"sigs.k8s.io/gateway-api/conformance/utils/suite"
@@ -24,7 +24,10 @@ import (
 )
 
 func init() {
-	ConformanceTests = append(ConformanceTests, LocalRateLimitTest)
+	ConformanceTests = append(ConformanceTests,
+		LocalRateLimitTest,
+		LocalRateLimitQueryParametersTest,
+	)
 }
 
 const (
@@ -61,8 +64,52 @@ var LocalRateLimitTest = suite.ConformanceTest{
 			t.Run(fmt.Sprintf("HeaderInvertMatch-%s", caseSuffix), func(t *testing.T) {
 				runHeaderInvertMatchRateLimitTest(t, suite, disableHeader)
 			})
+
+			t.Run(fmt.Sprintf("PathMatch-%s", caseSuffix), func(t *testing.T) {
+				runPathMatchRateLimitTest(t, suite, disableHeader)
+			})
+
+			t.Run(fmt.Sprintf("MethodMatch-%s", caseSuffix), func(t *testing.T) {
+				runMethodMatchRateLimitTest(t, suite, disableHeader)
+			})
+
+			t.Run(fmt.Sprintf("ShadowMode-%s", caseSuffix), func(t *testing.T) {
+				runShadowModeRateLimitTest(t, suite, disableHeader)
+			})
 		}
 	},
+}
+
+func runShadowModeRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite, disableHeader bool) {
+	ns := "gateway-conformance-infra"
+	gwNN := gatewayNN(disableHeader)
+	gwAddr := gatewayAndHTTPRoutesMustBeAccepted(t, suite, gwNN)
+
+	ancestorRef := gwapiv1.ParentReference{
+		Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
+		Kind:      gatewayapi.KindPtr(resource.KindGateway),
+		Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
+		Name:      gwapiv1.ObjectName(gwNN.Name),
+	}
+	BackendTrafficPolicyMustBeAccepted(t, suite.Client, types.NamespacedName{Name: "ratelimit-shadow-mode", Namespace: ns}, suite.ControllerName, ancestorRef)
+
+	expectedShadowResp := http.ExpectedResponse{
+		Request: http.Request{
+			Path: "/ratelimit-shadow-mode",
+			Headers: map[string]string{
+				"x-user-id": "one",
+			},
+		},
+		Response: http.Response{
+			// always return 200 because shadow mode
+			StatusCodes: []int{200},
+		},
+		Namespace: ns,
+	}
+	for range 10 {
+		// keep sending requests till get 200 first, that will cost one 200
+		MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &expectedShadowResp)
+	}
 }
 
 // gatewayNN return the gateway namespace name when disabled header or not
@@ -77,8 +124,7 @@ func gatewayNN(disableHeader bool) types.NamespacedName {
 
 func gatewayAndHTTPRoutesMustBeAccepted(t *testing.T, suite *suite.ConformanceTestSuite, gwNN types.NamespacedName) string {
 	gwRefs := []kubernetes.GatewayRef{
-		kubernetes.NewGatewayRef(gatewayNN(true)),
-		kubernetes.NewGatewayRef(gatewayNN(false)),
+		kubernetes.NewGatewayRef(gwNN),
 	}
 	gwAddrMap := utils.GatewaysMustBeAccepted(t, suite, gwRefs)
 	return gwAddrMap[gwNN]
@@ -96,20 +142,20 @@ func runNoRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite, disable
 			Path: "/no-ratelimit",
 		},
 		Response: http.Response{
-			StatusCode:    200,
+			StatusCodes:   []int{200},
 			AbsentHeaders: allRateLimitHeaders,
 		},
 		Namespace: ns,
 	}
 
 	// keep sending requests till get 200 first, that will cost one 200
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, expectOkResp)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &expectOkResp)
 
 	// send 10+ more
 	total := 10
 	for total > 0 {
 		// keep sending requests till get 200 first, that will cost one 200
-		http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, expectOkResp)
+		MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &expectOkResp)
 		total--
 	}
 }
@@ -119,7 +165,7 @@ func runSpecificUserRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuit
 	gwNN := gatewayNN(disableHeader)
 	gwAddr := gatewayAndHTTPRoutesMustBeAccepted(t, suite, gwNN)
 
-	ancestorRef := gwapiv1a2.ParentReference{
+	ancestorRef := gwapiv1.ParentReference{
 		Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
 		Kind:      gatewayapi.KindPtr(resource.KindGateway),
 		Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
@@ -137,20 +183,20 @@ func runSpecificUserRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuit
 			},
 		},
 		Response: http.Response{
-			StatusCode: 200,
+			StatusCodes: []int{200},
 		},
 		Namespace: ns,
 	}
 	if !disableHeader {
 		okResponse.Response.Headers = map[string]string{
-			RatelimitLimitHeaderName:     "3",
-			RatelimitRemainingHeaderName: "1",
-			RatelimitResetHeaderName:     "0",
+			RatelimitLimitHeaderName: "3",
+			// we didn't care the RatelimitRemainingHeaderName now,
+			// it might be 2 or 1 due to the calculation error of float
 		}
 	} else {
 		okResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, okResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
 
 	// this request should be limited because the user is john
 	limitResponse := http.ExpectedResponse{
@@ -161,19 +207,18 @@ func runSpecificUserRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuit
 			},
 		},
 		Response: http.Response{
-			StatusCode: 429,
+			StatusCodes: []int{429},
 		},
 		Namespace: ns,
 	}
 	if !disableHeader {
 		limitResponse.Response.Headers = map[string]string{
-			RatelimitLimitHeaderName:     "3",
-			RatelimitRemainingHeaderName: "0",
+			RatelimitLimitHeaderName: "3",
 		}
 	} else {
 		limitResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, limitResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &limitResponse)
 
 	// this request should not be limited because the user is not john hit default bucket
 	notJohnResponse := http.ExpectedResponse{
@@ -184,20 +229,20 @@ func runSpecificUserRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuit
 			},
 		},
 		Response: http.Response{
-			StatusCode: 200,
+			StatusCodes: []int{200},
 		},
 		Namespace: ns,
 	}
 	if !disableHeader {
 		notJohnResponse.Response.Headers = map[string]string{
-			RatelimitLimitHeaderName:     "10",
-			RatelimitRemainingHeaderName: "2", // there almost 8 requests before reach this
-			RatelimitResetHeaderName:     "0",
+			RatelimitLimitHeaderName: "10",
+			// we didn't care the RatelimitRemainingHeaderName now,
+			// it might be 9 or 8 due to the calculation error of float
 		}
 	} else {
 		notJohnResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, notJohnResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &notJohnResponse)
 
 	// In the end it will hit the limit
 	notJohnLimitResponse := http.ExpectedResponse{
@@ -208,7 +253,7 @@ func runSpecificUserRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuit
 			},
 		},
 		Response: http.Response{
-			StatusCode: 429,
+			StatusCodes: []int{429},
 		},
 		Namespace: ns,
 	}
@@ -220,7 +265,7 @@ func runSpecificUserRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuit
 	} else {
 		notJohnLimitResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, notJohnLimitResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &notJohnLimitResponse)
 }
 
 func runAllTrafficRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite, disableHeader bool) {
@@ -228,7 +273,7 @@ func runAllTrafficRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite,
 	gwNN := gatewayNN(disableHeader)
 	gwAddr := gatewayAndHTTPRoutesMustBeAccepted(t, suite, gwNN)
 
-	ancestorRef := gwapiv1a2.ParentReference{
+	ancestorRef := gwapiv1.ParentReference{
 		Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
 		Kind:      gatewayapi.KindPtr(resource.KindGateway),
 		Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
@@ -241,28 +286,28 @@ func runAllTrafficRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite,
 			Path: "/ratelimit-all-traffic",
 		},
 		Response: http.Response{
-			StatusCode: 200,
+			StatusCodes: []int{200},
 		},
 		Namespace: ns,
 	}
 	if !disableHeader {
 		okResponse.Response.Headers = map[string]string{
-			RatelimitLimitHeaderName:     "3",
-			RatelimitRemainingHeaderName: "1",
-			RatelimitResetHeaderName:     "0",
+			RatelimitLimitHeaderName: "3",
+			// we didn't care the RatelimitRemainingHeaderName now,
+			// it might be 2 or 1 due to the calculation error of float
 		}
 	} else {
 		okResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
 	// keep sending requests till get 200 first, that will cost one 200
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, okResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
 
 	limitResponse := http.ExpectedResponse{
 		Request: http.Request{
 			Path: "/ratelimit-all-traffic",
 		},
 		Response: http.Response{
-			StatusCode: 429,
+			StatusCodes: []int{429},
 		},
 		Namespace: ns,
 	}
@@ -275,7 +320,7 @@ func runAllTrafficRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite,
 		limitResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
 	// this request should be limited at the end
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, limitResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &limitResponse)
 }
 
 func runHeaderInvertMatchRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite, disableHeader bool) {
@@ -283,7 +328,7 @@ func runHeaderInvertMatchRateLimitTest(t *testing.T, suite *suite.ConformanceTes
 	gwNN := gatewayNN(disableHeader)
 	gwAddr := gatewayAndHTTPRoutesMustBeAccepted(t, suite, gwNN)
 
-	ancestorRef := gwapiv1a2.ParentReference{
+	ancestorRef := gwapiv1.ParentReference{
 		Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
 		Kind:      gatewayapi.KindPtr(resource.KindGateway),
 		Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
@@ -301,18 +346,20 @@ func runHeaderInvertMatchRateLimitTest(t *testing.T, suite *suite.ConformanceTes
 			},
 		},
 		Response: http.Response{
-			StatusCode: 200,
+			StatusCodes: []int{200},
 		},
 		Namespace: ns,
 	}
 	if !disableHeader {
 		okResponse.Response.Headers = map[string]string{
-			RatelimitLimitHeaderName:     "3",
-			RatelimitRemainingHeaderName: "1",
-			RatelimitResetHeaderName:     "0",
+			RatelimitLimitHeaderName: "3",
+			// we didn't care the RatelimitRemainingHeaderName now,
+			// it might be 2 or 1 due to the calculation error of float
 		}
+	} else {
+		okResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, okResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
 
 	// this request should be limited because the user is one and org is not test and the limit is 3
 	limitResponse := http.ExpectedResponse{
@@ -324,19 +371,20 @@ func runHeaderInvertMatchRateLimitTest(t *testing.T, suite *suite.ConformanceTes
 			},
 		},
 		Response: http.Response{
-			StatusCode: 429,
+			StatusCodes: []int{429},
 		},
 		Namespace: ns,
 	}
 	if !disableHeader {
 		limitResponse.Response.Headers = map[string]string{
-			RatelimitLimitHeaderName:     "3",
-			RatelimitRemainingHeaderName: "0",
+			RatelimitLimitHeaderName: "3",
+			// we didn't care the RatelimitRemainingHeaderName now,
+			// it might be 2 or 1 due to the calculation error of float
 		}
 	} else {
 		limitResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, limitResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &limitResponse)
 
 	// with test org
 	testOrgResponse := http.ExpectedResponse{
@@ -348,7 +396,7 @@ func runHeaderInvertMatchRateLimitTest(t *testing.T, suite *suite.ConformanceTes
 			},
 		},
 		Response: http.Response{
-			StatusCode: 200,
+			StatusCodes: []int{200},
 		},
 		Namespace: ns,
 	}
@@ -360,5 +408,266 @@ func runHeaderInvertMatchRateLimitTest(t *testing.T, suite *suite.ConformanceTes
 	} else {
 		testOrgResponse.Response.AbsentHeaders = allRateLimitHeaders
 	}
-	http.MakeRequestAndExpectEventuallyConsistentResponse(t, suite.RoundTripper, suite.TimeoutConfig, gwAddr, testOrgResponse)
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &testOrgResponse)
+}
+
+func runPathMatchRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite, disableHeader bool) {
+	ns := "gateway-conformance-infra"
+	gwNN := gatewayNN(disableHeader)
+	gwAddr := gatewayAndHTTPRoutesMustBeAccepted(t, suite, gwNN)
+
+	ancestorRef := gwapiv1.ParentReference{
+		Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
+		Kind:      gatewayapi.KindPtr(resource.KindGateway),
+		Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
+		Name:      gwapiv1.ObjectName(gwNN.Name),
+	}
+	BackendTrafficPolicyMustBeAccepted(t, suite.Client, types.NamespacedName{Name: "ratelimit-path-match", Namespace: ns}, suite.ControllerName, ancestorRef)
+
+	okResponse := http.ExpectedResponse{
+		Request: http.Request{
+			Path: "/ratelimit-path-match/foo",
+		},
+		Response: http.Response{
+			StatusCodes: []int{200},
+		},
+		Namespace: ns,
+	}
+	if !disableHeader {
+		okResponse.Response.Headers = map[string]string{
+			RatelimitLimitHeaderName: "3",
+			// we didn't care the RatelimitRemainingHeaderName now,
+			// it might be 2 or 1 due to the calculation error of float
+		}
+	} else {
+		okResponse.Response.AbsentHeaders = allRateLimitHeaders
+	}
+	// keep sending requests till get 200 first, that will cost one 200
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
+
+	limitResponse := http.ExpectedResponse{
+		Request: http.Request{
+			Path: "/ratelimit-path-match/foo",
+		},
+		Response: http.Response{
+			StatusCodes: []int{429},
+		},
+		Namespace: ns,
+	}
+	if !disableHeader {
+		limitResponse.Response.Headers = map[string]string{
+			RatelimitLimitHeaderName:     "3",
+			RatelimitRemainingHeaderName: "0", // at the end the remaining should be 0
+		}
+	} else {
+		limitResponse.Response.AbsentHeaders = allRateLimitHeaders
+	}
+	// this request should be limited at the end
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &limitResponse)
+
+	okResponse = http.ExpectedResponse{
+		Request: http.Request{
+			Path: "/ratelimit-path-match/bar",
+		},
+		Response: http.Response{
+			StatusCodes: []int{200},
+		},
+		Namespace: ns,
+	}
+	// this request should not be limited
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
+}
+
+func runMethodMatchRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite, disableHeader bool) {
+	ns := "gateway-conformance-infra"
+	gwNN := gatewayNN(disableHeader)
+	gwAddr := gatewayAndHTTPRoutesMustBeAccepted(t, suite, gwNN)
+
+	ancestorRef := gwapiv1.ParentReference{
+		Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
+		Kind:      gatewayapi.KindPtr(resource.KindGateway),
+		Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
+		Name:      gwapiv1.ObjectName(gwNN.Name),
+	}
+	BackendTrafficPolicyMustBeAccepted(t, suite.Client, types.NamespacedName{Name: "ratelimit-method-match", Namespace: ns}, suite.ControllerName, ancestorRef)
+
+	okResponse := http.ExpectedResponse{
+		Request: http.Request{
+			Path: "/ratelimit-method-match",
+		},
+		Response: http.Response{
+			StatusCodes: []int{200},
+		},
+		Namespace: ns,
+	}
+	if !disableHeader {
+		okResponse.Response.Headers = map[string]string{
+			RatelimitLimitHeaderName: "3",
+			// we didn't care the RatelimitRemainingHeaderName now,
+			// it might be 2 or 1 due to the calculation error of float
+		}
+	} else {
+		okResponse.Response.AbsentHeaders = allRateLimitHeaders
+	}
+	// keep sending requests till get 200 first, that will cost one 200
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
+
+	limitResponse := http.ExpectedResponse{
+		Request: http.Request{
+			Path: "/ratelimit-method-match",
+		},
+		Response: http.Response{
+			StatusCodes: []int{429},
+		},
+		Namespace: ns,
+	}
+	if !disableHeader {
+		limitResponse.Response.Headers = map[string]string{
+			RatelimitLimitHeaderName:     "3",
+			RatelimitRemainingHeaderName: "0", // at the end the remaining should be 0
+		}
+	} else {
+		limitResponse.Response.AbsentHeaders = allRateLimitHeaders
+	}
+	// this request should be limited at the end
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &limitResponse)
+
+	okResponse = http.ExpectedResponse{
+		Request: http.Request{
+			Path:   "/ratelimit-method-match",
+			Method: "POST",
+		},
+		Response: http.Response{
+			StatusCodes: []int{200},
+		},
+		Namespace: ns,
+	}
+	// this request should not be limited
+	MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
+}
+
+var LocalRateLimitQueryParametersTest = suite.ConformanceTest{
+	ShortName:   "LocalRateLimitQueryParameters",
+	Description: "Make sure local rate limit work with query parameters",
+	Manifests:   []string{"testdata/local-ratelimit-query-parameters.yaml"},
+	Test: func(t *testing.T, suite *suite.ConformanceTestSuite) {
+		for _, disableHeader := range []bool{true, false} {
+			runQueryParametersRateLimitTest(t, suite, disableHeader)
+		}
+	},
+}
+
+func runQueryParametersRateLimitTest(t *testing.T, suite *suite.ConformanceTestSuite, disableHeader bool) {
+	ns := "gateway-conformance-infra"
+	gwNN := gatewayNN(disableHeader)
+	gwAddr := gatewayAndHTTPRoutesMustBeAccepted(t, suite, gwNN)
+
+	ancestorRef := gwapiv1.ParentReference{
+		Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
+		Kind:      gatewayapi.KindPtr(resource.KindGateway),
+		Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
+		Name:      gwapiv1.ObjectName(gwNN.Name),
+	}
+	BackendTrafficPolicyMustBeAccepted(t, suite.Client, types.NamespacedName{Name: "local-ratelimit-query-parameters", Namespace: ns}, suite.ControllerName, ancestorRef)
+
+	WaitForPods(t, suite.Client, ns, map[string]string{"app": "infra-backend-v1"}, corev1.PodRunning, &PodReady)
+
+	caseSuffix := "disableHeader"
+	if !disableHeader {
+		caseSuffix = "withHeader"
+	}
+
+	t.Run(fmt.Sprintf("query_parameters_should_be_rate_limited-%s", caseSuffix), func(t *testing.T) {
+		// First request - should succeed
+		okResponse := http.ExpectedResponse{
+			Request: http.Request{
+				Path: "/query-ratelimit?user=alice",
+			},
+			Response: http.Response{
+				StatusCodes: []int{200},
+			},
+			Namespace: ns,
+		}
+		if !disableHeader {
+			okResponse.Response.Headers = map[string]string{
+				RatelimitLimitHeaderName: "3",
+				// we didn't care the RatelimitRemainingHeaderName now,
+				// it might be 2 or 1 due to the calculation error of float
+			}
+		} else {
+			okResponse.Response.AbsentHeaders = allRateLimitHeaders
+		}
+		// Keep sending requests till get 200 first, that will cost one 200
+		MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
+
+		// Fourth request - should be rate limited
+		limitResponse := http.ExpectedResponse{
+			Request: http.Request{
+				Path: "/query-ratelimit?user=alice",
+			},
+			Response: http.Response{
+				StatusCodes: []int{429},
+			},
+			Namespace: ns,
+		}
+		if !disableHeader {
+			limitResponse.Response.Headers = map[string]string{
+				RatelimitLimitHeaderName: "3",
+				// we didn't care the RatelimitRemainingHeaderName now,
+				// it might be 2 or 1 due to the calculation error of float
+			}
+		} else {
+			limitResponse.Response.AbsentHeaders = allRateLimitHeaders
+		}
+		MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &limitResponse)
+	})
+
+	t.Run(fmt.Sprintf("different_query_parameter_values_should_not_be_limited-%s", caseSuffix), func(t *testing.T) {
+		// Requests with ?user=bob don't match the selector (user=alice).
+		// With QueryParameterValueMatch action, non-matching values don't create a descriptor entry,
+		// so they fall through to the default bucket (unlimited). We verify they succeed and aren't rate limited.
+		okResponse := http.ExpectedResponse{
+			Request: http.Request{
+				Path: "/query-ratelimit?user=bob",
+			},
+			Response: http.Response{
+				StatusCodes: []int{200},
+			},
+			Namespace: ns,
+		}
+		if disableHeader {
+			okResponse.Response.AbsentHeaders = allRateLimitHeaders
+		}
+		// Keep sending requests till get 200 first, that will cost one 200
+		MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse)
+
+		// Send multiple requests that should all succeed (default bucket is unlimited)
+		okResponse2 := http.ExpectedResponse{
+			Request: http.Request{
+				Path: "/query-ratelimit?user=bob",
+			},
+			Response: http.Response{
+				StatusCodes: []int{200},
+			},
+			Namespace: ns,
+		}
+		if disableHeader {
+			okResponse2.Response.AbsentHeaders = allRateLimitHeaders
+		}
+		MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse2)
+
+		okResponse3 := http.ExpectedResponse{
+			Request: http.Request{
+				Path: "/query-ratelimit?user=bob",
+			},
+			Response: http.Response{
+				StatusCodes: []int{200},
+			},
+			Namespace: ns,
+		}
+		if disableHeader {
+			okResponse3.Response.AbsentHeaders = allRateLimitHeaders
+		}
+		MakeRequestAndExpectEventuallyConsistentResponseExceptErrors(t, suite.RoundTripper, &suite.TimeoutConfig, gwAddr, &okResponse3)
+	})
 }

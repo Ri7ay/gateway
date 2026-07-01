@@ -25,6 +25,9 @@
             "clusterManager": {
               "localClusterName": "local_cluster"
             },
+            "deferredStatOptions": {
+              "enableDeferredCreationStats": true
+            },
             "dynamicResources": {
               "adsConfig": {
                 "apiType": "DELTA_GRPC",
@@ -40,10 +43,12 @@
               },
               "cdsConfig": {
                 "ads": {},
+                "initialFetchTimeout": "0s",
                 "resourceApiVersion": "V3"
               },
               "ldsConfig": {
                 "ads": {},
+                "initialFetchTimeout": "0s",
                 "resourceApiVersion": "V3"
               }
             },
@@ -104,32 +109,32 @@
                 },
                 {
                   "connectTimeout": "10s",
-                  "loadAssignment": {
-                    "clusterName": "local_cluster",
-                    "endpoints": [
+                  "edsClusterConfig": {
+                    "edsConfig": {
+                      "ads": {},
+                      "resourceApiVersion": "V3"
+                    },
+                    "serviceName": "local_cluster"
+                  },
+                  "loadBalancingPolicy": {
+                    "policies": [
                       {
-                        "lbEndpoints": [
-                          {
-                            "endpoint": {
-                              "address": {
-                                "socketAddress": {
-                                  "address": "127.0.0.1",
-                                  "portValue": 10080
-                                }
+                        "typedExtensionConfig": {
+                          "name": "envoy.load_balancing_policies.least_request",
+                          "typedConfig": {
+                            "@type": "type.googleapis.com/envoy.extensions.load_balancing_policies.least_request.v3.LeastRequest",
+                            "localityLbConfig": {
+                              "zoneAwareLbConfig": {
+                                "minClusterSize": "1"
                               }
-                            },
-                            "loadBalancingWeight": 1
+                            }
                           }
-                        ],
-                        "loadBalancingWeight": 1,
-                        "locality": {
-                          "zone": "$(ENVOY_SERVICE_ZONE)"
                         }
                       }
                     ]
                   },
                   "name": "local_cluster",
-                  "type": "STATIC"
+                  "type": "EDS"
                 },
                 {
                   "connectTimeout": "10s",
@@ -265,6 +270,27 @@
                   "name": "envoy-gateway-proxy-stats-0.0.0.0-19001"
                 }
               ]
+            },
+            "statsConfig": {
+              "statsTags": [
+                {
+                  "regex": "\\.zone(\\.(([^\\.]+)\\.))",
+                  "tagName": "from_zone"
+                },
+                {
+                  "regex": "\\.zone\\.[^\\.]+\\.(([^\\.]+)\\.)",
+                  "tagName": "to_zone"
+                },
+                {
+                  "regex": "^cluster(\\..+\\.(.+))\\.total_match_count$",
+                  "tagName": "socket_match_name"
+                },
+                {
+                  "regex": "circuit_breakers\\.((.+?)\\.).+",
+                  "tagName": "priority"
+                }
+              ],
+              "useAllDefaultTags": true
             }
           }
         },
@@ -338,7 +364,6 @@
                   "serviceName": "httproute/envoy-gateway-system/backend/rule/0"
                 },
                 "ignoreHealthOnHostRemoval": true,
-                "lbPolicy": "LEAST_REQUEST",
                 "loadBalancingPolicy": {
                   "policies": [
                     {
@@ -387,7 +412,6 @@
                 "dnsLookupFamily": "V4_PREFERRED",
                 "dnsRefreshRate": "30s",
                 "ignoreHealthOnHostRemoval": true,
-                "lbPolicy": "LEAST_REQUEST",
                 "loadAssignment": {
                   "clusterName": "raw_githubusercontent_com_443",
                   "endpoints": [
@@ -640,7 +664,8 @@
                                     "forward": true,
                                     "normalizePayloadInMetadata": {
                                       "spaceDelimitedClaims": [
-                                        "scope"
+                                        "scope",
+                                        "scp"
                                       ]
                                     },
                                     "payloadInMetadata": "example",

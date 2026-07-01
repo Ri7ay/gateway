@@ -6,6 +6,7 @@
 package egctl
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,7 +59,7 @@ func newFakePortForwarder(b []byte) (kube.PortForwarder, error) {
 		localPort:    p,
 		mux:          http.NewServeMux(),
 	}
-	fw.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	fw.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write(fw.responseBody)
 	})
 
@@ -88,6 +90,22 @@ func (fw *fakePortForwarder) Address() string {
 }
 
 func (fw *fakePortForwarder) WaitForStop() {}
+
+type failingStartPortForwarder struct {
+	err error
+}
+
+func (fw *failingStartPortForwarder) Start() error {
+	return fw.err
+}
+
+func (fw *failingStartPortForwarder) Stop() {}
+
+func (fw *failingStartPortForwarder) Address() string {
+	return "localhost:0"
+}
+
+func (fw *failingStartPortForwarder) WaitForStop() {}
 
 func TestExtractAllConfigDump(t *testing.T) {
 	input, err := readInputConfig("in.all.json")
@@ -255,6 +273,53 @@ func TestLabelSelectorBadInput(t *testing.T) {
 	}
 }
 
+func TestRetrieveConfigDumpFromPodsReturnsPortForwarderErrors(t *testing.T) {
+	pods := []types.NamespacedName{
+		{
+			Namespace: defaultNamespace,
+			Name:      defaultEnvoyGatewayPodName,
+		},
+	}
+
+	cases := []struct {
+		name      string
+		forwarder configDumpPortForwarderFunc
+		wantErr   error
+	}{
+		{
+			name:    "port forwarder creation fails",
+			wantErr: errors.New("create port forwarder"),
+			forwarder: func(kube.CLIClient, types.NamespacedName, int) (kube.PortForwarder, error) {
+				return nil, errors.New("create port forwarder")
+			},
+		},
+		{
+			name:    "port forwarder start fails",
+			wantErr: errors.New("start port forwarder"),
+			forwarder: func(kube.CLIClient, types.NamespacedName, int) (kube.PortForwarder, error) {
+				return &failingStartPortForwarder{err: errors.New("start port forwarder")}, nil
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			errCh := make(chan error, 1)
+			go func() {
+				_, err := retrieveConfigDumpFromPods(&fakeCLIClient{}, pods, false, AllEnvoyConfigType, tc.forwarder)
+				errCh <- err
+			}()
+
+			select {
+			case err := <-errCh:
+				require.ErrorContains(t, err, tc.wantErr.Error())
+			case <-time.After(time.Second):
+				t.Fatal("retrieveConfigDumpFromPods did not return after port forwarder error")
+			}
+		})
+	}
+}
+
 func readInputConfig(filename string) ([]byte, error) {
 	b, err := os.ReadFile(path.Join("testdata", "config", "in", filename))
 	if err != nil {
@@ -301,6 +366,9 @@ func (f *fakeCLIClient) PodExec(types.NamespacedName, string, string) (stdout, s
 }
 
 func (f *fakeCLIClient) Kube() kubernetes.Interface {
+	if f.cm == nil {
+		return fake.NewSimpleClientset()
+	}
 	return fake.NewSimpleClientset(f.cm)
 }
 
@@ -520,8 +588,104 @@ func TestCheckRateLimitPodStatusReady(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.caseName, func(t *testing.T) {
-			actual := checkRateLimitPodStatusReady(tc.status)
+			actual := checkRateLimitPodStatusReady(&tc.status)
 			require.Equal(t, tc.expect, actual)
 		})
 	}
+}
+
+func TestExtractEnvoyGatewayConfigDump(t *testing.T) {
+	fw, err := newFakePortForwarder([]byte(`{
+  "resources": [
+    {
+      "metadata": {
+        "name": "eg",
+        "namespace": "default"
+      }
+    }
+  ],
+  "timestamp": "2026-01-01T00:00:00Z",
+  "totalCount": 1
+}`))
+	require.NoError(t, err)
+	require.NoError(t, fw.Start())
+
+	resources, err := extractEnvoyGatewayConfigDump(fw, GatewayEnvoyGatewayConfigType)
+	require.NoError(t, err)
+	items, ok := resources.([]interface{})
+	require.True(t, ok)
+	require.Len(t, items, 1)
+
+	fw.Stop()
+}
+
+func TestEnvoyGatewayConfigDumpRequestUsesResourceQuery(t *testing.T) {
+	fw, err := newFakePortForwarder([]byte(`{"resources":[]}`))
+	require.NoError(t, err)
+
+	fakeFW := fw.(*fakePortForwarder)
+	fakeFW.mux = http.NewServeMux()
+	fakeFW.mux.HandleFunc("/api/config_dump", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "resource=gateway", r.URL.RawQuery)
+		_, _ = w.Write([]byte(`{"resources":[]}`))
+	})
+
+	require.NoError(t, fakeFW.Start())
+	_, err = envoyGatewayConfigDumpRequest(fakeFW.Address(), GatewayEnvoyGatewayConfigType)
+	require.NoError(t, err)
+	fakeFW.Stop()
+}
+
+func TestFetchRunningEnvoyGatewayPods(t *testing.T) {
+	t.Run("find running pods with default selector", func(t *testing.T) {
+		fakeCli := &fakeCLIClient{
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "envoy-gateway-abc",
+						Namespace: "envoy-gateway-system",
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+					},
+				},
+			},
+		}
+
+		pods, err := fetchRunningEnvoyGatewayPods(fakeCli, types.NamespacedName{Namespace: "envoy-gateway-system"}, nil, false)
+		require.NoError(t, err)
+		require.Len(t, pods, 1)
+		require.Equal(t, "envoy-gateway-abc", pods[0].Name)
+	})
+
+	t.Run("return error when no pods match default selector", func(t *testing.T) {
+		fakeCli := &fakeCLIClient{pods: nil}
+		_, err := fetchRunningEnvoyGatewayPods(fakeCli, types.NamespacedName{Namespace: "envoy-gateway-system"}, nil, false)
+		require.ErrorContains(t, err, envoyGatewayDefaultLabelSelector)
+	})
+
+	t.Run("return error when all namespaces has no matching pods", func(t *testing.T) {
+		fakeCli := &fakeCLIClient{pods: nil}
+		_, err := fetchRunningEnvoyGatewayPods(fakeCli, types.NamespacedName{}, nil, true)
+		require.ErrorContains(t, err, envoyGatewayDefaultLabelSelector)
+	})
+
+	t.Run("return error when pod is not running", func(t *testing.T) {
+		fakeCli := &fakeCLIClient{
+			pods: []corev1.Pod{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "envoy-gateway-abc",
+						Namespace: "envoy-gateway-system",
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodPending,
+					},
+				},
+			},
+		}
+
+		_, err := fetchRunningEnvoyGatewayPods(fakeCli, types.NamespacedName{Namespace: "envoy-gateway-system"}, nil, false)
+		require.ErrorContains(t, err, "is not running")
+	})
 }

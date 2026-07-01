@@ -45,6 +45,20 @@ type HTTPTimeout struct {
 	//
 	// +optional
 	RequestTimeout *gwapiv1.Duration `json:"requestTimeout,omitempty" yaml:"requestTimeout,omitempty"`
+
+	// MaxStreamDuration is the maximum duration for a stream to complete. This timeout measures the time
+	// from when the request is sent until the response stream is fully consumed and does not apply to
+	// non-streaming requests.
+	// When set to "0s", no max duration is applied and streams can run indefinitely.
+	//
+	// +optional
+	MaxStreamDuration *gwapiv1.Duration `json:"maxStreamDuration,omitempty"`
+
+	//  The stream idle timeout defines the amount of time a stream can exist without any upstream or downstream activity.
+	//  If not specified, StreamIdleTimeout is inherited from the listener-level setting, which can be configured via ClientTrafficPolicy.
+	//
+	// +optional
+	StreamIdleTimeout *gwapiv1.Duration `json:"streamIdleTimeout,omitempty"`
 }
 
 type ClientTimeout struct {

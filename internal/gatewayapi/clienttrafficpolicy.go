@@ -6,6 +6,7 @@
 package gatewayapi
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -19,7 +20,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/gatewayapi/resource"
@@ -29,12 +29,40 @@ import (
 )
 
 const (
-	// Use an invalid string to represent all sections (listeners) within a Gateway
-	AllSections = "/"
+	entireGatewayScope = "/entireGatewayScope"
 )
 
-func hasSectionName(target *gwapiv1a2.LocalPolicyTargetReferenceWithSectionName) bool {
+type ctpAttachScope int
+
+const (
+	scopeSpecificSection   ctpAttachScope = iota
+	scopeEntireGateway     ctpAttachScope = iota
+	scopeEntireListenerSet ctpAttachScope = iota
+)
+
+func hasSectionName(target *policyTargetReferenceWithSectionName) bool {
 	return target.SectionName != nil
+}
+
+// deprecatedFieldsUsedInClientTrafficPolicy returns a map of deprecated field paths to their alternatives.
+func deprecatedFieldsUsedInClientTrafficPolicy(policy *egv1a1.ClientTrafficPolicy) map[string]string {
+	deprecatedFields := make(map[string]string)
+	if policy.Spec.EnableProxyProtocol != nil {
+		deprecatedFields["spec.enableProxyProtocol"] = "spec.proxyProtocol"
+	}
+	if policy.Spec.Headers != nil && policy.Spec.Headers.PreserveXRequestID != nil {
+		deprecatedFields["spec.headers.preserveXRequestID"] = "spec.headers.requestID"
+	}
+	if policy.Spec.TargetRef != nil {
+		deprecatedFields["spec.targetRef"] = "spec.targetRefs"
+	}
+	// Optional is a non-pointer bool, so deprecated usage is only observable when it changes behavior.
+	if policy.Spec.TLS != nil &&
+		policy.Spec.TLS.ClientValidation != nil &&
+		policy.Spec.TLS.ClientValidation.Optional {
+		deprecatedFields["spec.tls.clientValidation.optional"] = "spec.tls.clientValidation.mode"
+	}
+	return deprecatedFields
 }
 
 func (t *Translator) ProcessClientTrafficPolicies(
@@ -46,19 +74,29 @@ func (t *Translator) ProcessClientTrafficPolicies(
 	var res []*egv1a1.ClientTrafficPolicy
 
 	clientTrafficPolicies := resources.ClientTrafficPolicies
-	// Sort based on timestamp
-	sort.Slice(clientTrafficPolicies, func(i, j int) bool {
-		return clientTrafficPolicies[i].CreationTimestamp.Before(&(clientTrafficPolicies[j].CreationTimestamp))
-	})
+	// ClientTrafficPolicies are already sorted by the provider layer
 
-	policyMap := make(map[types.NamespacedName]sets.Set[string])
+	// claimedScopes tracks entire Gateway or entire ListenerSet claims per gateway key.
+	// Used to mark duplicate whole-scope policies as Conflicted.
+	claimedScopes := make(map[types.NamespacedName]sets.Set[string])
+	// claimedSections tracks individual section names claimed per gateway key.
+	// Used to mark sectionName policies as Conflicted, skip already-translated sections,
+	// and build Overridden status messages.
+	claimedSections := make(map[types.NamespacedName]sets.Set[string])
 
-	// Build a map out of gateways for faster lookup since users might have hundreds of gateway or more.
+	// Build a map out of gateways and listener sets for faster lookup since users might have hundreds or more.
 	gatewayMap := map[types.NamespacedName]*policyGatewayTargetContext{}
 	for _, gw := range gateways {
 		key := utils.NamespacedName(gw)
 		gatewayMap[key] = &policyGatewayTargetContext{GatewayContext: gw}
 	}
+	listenerSetMap := map[types.NamespacedName]*gwapiv1.ListenerSet{}
+	for _, ls := range resources.ListenerSets {
+		key := utils.NamespacedName(ls)
+		listenerSetMap[key] = ls
+	}
+
+	policyCopies := clientTrafficPolicyCopiesWithStatusDeepCopy(clientTrafficPolicies)
 
 	handledPolicies := make(map[types.NamespacedName]*egv1a1.ClientTrafficPolicy)
 	// Translate
@@ -66,36 +104,38 @@ func (t *Translator) ProcessClientTrafficPolicies(
 	// 2. Then loop again and translate the policies without a sectionName
 	// TODO: Import sort order to ensure policy with same section always appear
 	// before policy with no section so below loops can be flattened into 1.
-	for _, currPolicy := range clientTrafficPolicies {
+	for i, currPolicy := range clientTrafficPolicies {
 		policyName := utils.NamespacedName(currPolicy)
-		// This loop only handles policies that target a specific section. When
-		// targeting a policy with a selector, it's not possible to specify a SectionName
-		// so there's no need to try to match targets with selectors
-		targetRefs := currPolicy.Spec.GetTargetRefs()
-		for _, currTarget := range targetRefs {
-			if hasSectionName(&currTarget) {
+		// Only resolve TargetRefs from targetRefs field since TargetSelectors can't specify sectionName.
+		targetRefs := resolvePolicyTargetsFromReferences(currPolicy.Spec.PolicyTargetReferences, currPolicy.Namespace)
+		for _, targetRef := range targetRefs {
+			if hasSectionName(&targetRef) {
 				policy, found := handledPolicies[policyName]
 				if !found {
-					policy = currPolicy.DeepCopy()
+					policy = policyCopies[i]
 					handledPolicies[policyName] = policy
 					res = append(res, policy)
 				}
 
-				gateway, resolveErr := resolveCTPolicyTargetRef(policy, &currTarget, gatewayMap)
+				resolved, resolveErr := resolveClientTrafficPolicyTargetRef(&targetRef, gatewayMap, listenerSetMap)
 
 				// Negative statuses have already been assigned so its safe to skip
-				if gateway == nil {
+				if resolved == nil {
 					continue
 				}
+				gateway, ls := resolved.gateway, resolved.listenerSet
 				key := utils.NamespacedName(gateway)
-				ancestorRefs := []gwapiv1a2.ParentReference{
-					getAncestorRefForPolicy(key, currTarget.SectionName),
+				var ancestorRef gwapiv1.ParentReference
+				if targetRef.Kind == resource.KindListenerSet {
+					ancestorRef = getAncestorRefForListenerSetPolicy(utils.NamespacedName(ls), targetRef.SectionName)
+				} else {
+					ancestorRef = getAncestorRefForPolicy(key, targetRef.SectionName)
 				}
 
 				// Set conditions for resolve error, then skip current gateway
 				if resolveErr != nil {
-					status.SetResolveErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetResolveErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						resolveErr,
@@ -105,19 +145,22 @@ func (t *Translator) ProcessClientTrafficPolicies(
 				}
 
 				// Check if another policy targeting the same section exists
-				section := string(*(currTarget.SectionName))
-				s, ok := policyMap[key]
-				if ok && s.Has(section) {
+				section := string(*(targetRef.SectionName))
+				sectionKey := section
+				if targetRef.Kind == resource.KindListenerSet {
+					sectionKey = fmt.Sprintf("%s%s", lsPrefix(ls), section)
+				}
+				if claimedSections[key].Has(sectionKey) {
 					message := fmt.Sprintf("Unable to target section of %s, another ClientTrafficPolicy has already attached to it",
-						string(currTarget.Name))
+						string(targetRef.Name))
 
 					resolveErr = &status.PolicyResolveError{
-						Reason:  gwapiv1a2.PolicyReasonConflicted,
+						Reason:  gwapiv1.PolicyReasonConflicted,
 						Message: message,
 					}
 
-					status.SetResolveErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetResolveErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						resolveErr,
@@ -126,22 +169,32 @@ func (t *Translator) ProcessClientTrafficPolicies(
 					continue
 				}
 
-				// Add section to policy map
-				if s == nil {
-					policyMap[key] = sets.New[string]()
+				if claimedSections[key] == nil {
+					claimedSections[key] = sets.New[string]()
 				}
-				policyMap[key].Insert(section)
+				claimedSections[key].Insert(sectionKey)
 
 				// Translate for listener matching section name
-				var err error
+				var (
+					err                 error
+					http3WarningMessage string
+				)
 				for _, l := range gateway.listeners {
 					// Find IR
 					irKey := t.getIRKey(l.gateway.Gateway)
 					// It must exist since we've already finished processing the gateways
 					gwXdsIR := xdsIR[irKey]
+
+					if targetRef.Kind == resource.KindListenerSet && !listenersBelongToLS(l, ls) {
+						continue
+					}
 					if string(l.Name) == section {
-						err = validatePortOverlapForClientTrafficPolicy(l, gwXdsIR, false)
+						err = validatePortOverlapForClientTrafficPolicy(l, gwXdsIR, scopeSpecificSection)
 						if err == nil {
+							httpIR := gwXdsIR.GetHTTPListener(irListenerName(l))
+							if shouldDisableHTTP3ForClientValidation(policy, httpIR) {
+								http3WarningMessage = disabledHTTP3WarningMessage([]string{string(l.Name)})
+							}
 							err = t.translateClientTrafficPolicyForListener(policy, l, xdsIR, infraIR, resources)
 						}
 						break
@@ -150,8 +203,8 @@ func (t *Translator) ProcessClientTrafficPolicies(
 
 				// Set conditions for translation error if it got any
 				if err != nil {
-					status.SetTranslationErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
+					status.SetTranslationErrorForPolicyAncestor(&policy.Status,
+						&ancestorRef,
 						t.GatewayControllerName,
 						policy.Generation,
 						status.Error2ConditionMsg(err),
@@ -159,145 +212,301 @@ func (t *Translator) ProcessClientTrafficPolicies(
 				}
 
 				// Set Accepted condition if it is unset
-				status.SetAcceptedForPolicyAncestors(&policy.Status, ancestorRefs, t.GatewayControllerName, policy.Generation)
+				status.SetAcceptedForPolicyAncestor(&policy.Status, &ancestorRef, t.GatewayControllerName, policy.Generation)
+
+				// Set Warning condition if HTTP/3 was disabled for the listener
+				if http3WarningMessage != "" {
+					status.SetWarningForPolicyAncestor(&policy.Status, &ancestorRef, t.GatewayControllerName,
+						status.PolicyReasonUnsupportedHTTP3ClientValidation, http3WarningMessage, policy.Generation)
+				}
+
+				// Check for deprecated fields and set warning if any are found
+				if deprecatedFields := deprecatedFieldsUsedInClientTrafficPolicy(policy); len(deprecatedFields) > 0 {
+					status.SetDeprecatedFieldsWarningForPolicyAncestor(&policy.Status, &ancestorRef, t.GatewayControllerName, policy.Generation, deprecatedFields)
+				}
 			}
 		}
 	}
 
-	// Policy with no section set (targeting all sections)
-	for _, currPolicy := range clientTrafficPolicies {
-		policyName := utils.NamespacedName(currPolicy)
-		targetRefs := getPolicyTargetRefs(currPolicy.Spec.PolicyTargetReferences, gateways)
-		for _, currTarget := range targetRefs {
-			if !hasSectionName(&currTarget) {
+	// Resolve each policy's targets.
+	policyTargets := make([][]policyTargetReferenceWithSectionName, len(clientTrafficPolicies))
+	for i, currPolicy := range clientTrafficPolicies {
+		policyTargets[i] = resolvePolicyTargetsForGatewayAndListenerSet(
+			currPolicy.Spec.PolicyTargetReferences,
+			gateways,
+			resources.ListenerSets,
+			resources.ReferenceGrants,
+			egv1a1.GroupName,
+			egv1a1.KindClientTrafficPolicy,
+			currPolicy.Namespace,
+			t.GetNamespace,
+		)
+	}
 
-				policy, found := handledPolicies[policyName]
-				if !found {
-					policy = currPolicy.DeepCopy()
-					res = append(res, policy)
-					handledPolicies[policyName] = policy
-				}
+	// Policy with no section set (targeting all sections of a Gateway or ListenerSet).
+	// ListenerSet-wide policies are processed before Gateway-wide so that the more specific
+	// target always wins regardless of input order.
+	for _, passKind := range []gwapiv1.Kind{resource.KindListenerSet, resource.KindGateway} {
+		for i, currPolicy := range clientTrafficPolicies {
+			policyName := utils.NamespacedName(currPolicy)
+			for _, currTarget := range policyTargets[i] {
+				if !hasSectionName(&currTarget) {
 
-				gateway, resolveErr := resolveCTPolicyTargetRef(policy, &currTarget, gatewayMap)
-
-				// Negative statuses have already been assigned so its safe to skip
-				if gateway == nil {
-					continue
-				}
-
-				key := utils.NamespacedName(gateway)
-				ancestorRefs := []gwapiv1a2.ParentReference{
-					getAncestorRefForPolicy(key, nil),
-				}
-
-				// Set conditions for resolve error, then skip current gateway
-				if resolveErr != nil {
-					status.SetResolveErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
-						t.GatewayControllerName,
-						policy.Generation,
-						resolveErr,
-					)
-
-					continue
-				}
-
-				// Check if another policy targeting the same Gateway exists
-				s, ok := policyMap[key]
-				if ok && s.Has(AllSections) {
-					message := fmt.Sprintf("Unable to target Gateway %s, another ClientTrafficPolicy has already attached to it",
-						string(currTarget.Name))
-
-					resolveErr = &status.PolicyResolveError{
-						Reason:  gwapiv1a2.PolicyReasonConflicted,
-						Message: message,
-					}
-
-					status.SetResolveErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
-						t.GatewayControllerName,
-						policy.Generation,
-						resolveErr,
-					)
-
-					continue
-				}
-
-				// Check if another policy targeting the same Gateway exists
-				if ok && (s.Len() > 0) {
-					// Maintain order here to ensure status/string does not change with same data
-					sections := s.UnsortedList()
-					sort.Strings(sections)
-					message := fmt.Sprintf("There are existing ClientTrafficPolicies that are overriding these sections %v", sections)
-
-					status.SetConditionForPolicyAncestors(&policy.Status,
-						ancestorRefs,
-						t.GatewayControllerName,
-						egv1a1.PolicyConditionOverridden,
-						metav1.ConditionTrue,
-						egv1a1.PolicyReasonOverridden,
-						message,
-						policy.Generation,
-					)
-				}
-
-				// Add section to policy map
-				if s == nil {
-					policyMap[key] = sets.New[string]()
-				}
-				policyMap[key].Insert(AllSections)
-
-				// Translate sections that have not yet been targeted
-				var errs error
-				for _, l := range gateway.listeners {
-					// Skip if section has already been targeted
-					if s != nil && s.Has(string(l.Name)) {
+					if currTarget.Kind != passKind {
 						continue
 					}
 
-					// Find IR
-					irKey := t.getIRKey(l.gateway.Gateway)
-					// It must exist since we've already finished processing the gateways
-					gwXdsIR := xdsIR[irKey]
-					if err := validatePortOverlapForClientTrafficPolicy(l, gwXdsIR, true); err != nil {
-						errs = errors.Join(errs, err)
-					} else if err := t.translateClientTrafficPolicyForListener(policy, l, xdsIR, infraIR, resources); err != nil {
-						errs = errors.Join(errs, err)
+					policy, found := handledPolicies[policyName]
+					if !found {
+						policy = policyCopies[i]
+						res = append(res, policy)
+						handledPolicies[policyName] = policy
+					}
+
+					resolved, resolveErr := resolveClientTrafficPolicyTargetRef(&currTarget, gatewayMap, listenerSetMap)
+
+					// Negative statuses have already been assigned so its safe to skip
+					if resolved == nil {
+						continue
+					}
+					gateway, ls := resolved.gateway, resolved.listenerSet
+					gatewayKey := utils.NamespacedName(gateway)
+					var ancestorRef gwapiv1.ParentReference
+					if currTarget.Kind == resource.KindListenerSet {
+						ancestorRef = getAncestorRefForListenerSetPolicy(utils.NamespacedName(ls), nil)
+					} else {
+						ancestorRef = getAncestorRefForPolicy(gatewayKey, nil)
+					}
+
+					// Set conditions for resolve error, then skip current gateway
+					if resolveErr != nil {
+						status.SetResolveErrorForPolicyAncestor(&policy.Status,
+							&ancestorRef,
+							t.GatewayControllerName,
+							policy.Generation,
+							resolveErr,
+						)
+
+						continue
+					}
+
+					policyTargetsLS := currTarget.Kind == resource.KindListenerSet
+					scopeKey := entireGatewayScope
+					if policyTargetsLS {
+						scopeKey = "listenerset/" + types.NamespacedName{Namespace: ls.Namespace, Name: ls.Name}.String()
+					}
+
+					scope, scopeExists := claimedScopes[gatewayKey]
+					conflictingScope := scopeExists && scope.Has(scopeKey)
+					if conflictingScope {
+						var message string
+						if policyTargetsLS {
+							message = fmt.Sprintf("Unable to target ListenerSet %s, another ClientTrafficPolicy has already attached to it",
+								string(currTarget.Name))
+						} else {
+							message = fmt.Sprintf("Unable to target Gateway %s, another ClientTrafficPolicy has already attached to it",
+								string(currTarget.Name))
+						}
+
+						resolveErr = &status.PolicyResolveError{
+							Reason:  gwapiv1.PolicyReasonConflicted,
+							Message: message,
+						}
+
+						status.SetResolveErrorForPolicyAncestor(&policy.Status,
+							&ancestorRef,
+							t.GatewayControllerName,
+							policy.Generation,
+							resolveErr,
+						)
+
+						continue
+					}
+
+					var overridingSections []string
+					if policyTargetsLS {
+						prefix := lsPrefix(ls)
+						for _, claimedSection := range claimedSections[gatewayKey].UnsortedList() {
+							if strings.HasPrefix(claimedSection, prefix) {
+								overridingSections = append(overridingSections, strings.TrimPrefix(claimedSection, prefix))
+							}
+						}
+					} else {
+						// LS-claimed sections have a scoped prefix (ns/name/listenerName);
+						// strip it so the display name is the bare listener name.
+						for _, claimedSection := range claimedSections[gatewayKey].UnsortedList() {
+							slashIndex := strings.LastIndex(claimedSection, "/")
+							if slashIndex >= 0 {
+								claimedSection = claimedSection[slashIndex+1:]
+							}
+							overridingSections = append(overridingSections, claimedSection)
+						}
+					}
+					competingPolicy := len(overridingSections) > 0
+					if competingPolicy {
+						sort.Strings(overridingSections)
+						message := fmt.Sprintf("There are existing ClientTrafficPolicies that are overriding these sections %v", overridingSections)
+
+						status.SetConditionForPolicyAncestor(&policy.Status,
+							&ancestorRef,
+							t.GatewayControllerName,
+							egv1a1.PolicyConditionOverridden,
+							metav1.ConditionTrue,
+							egv1a1.PolicyReasonOverridden,
+							message,
+							policy.Generation,
+						)
+					}
+
+					if scope == nil {
+						claimedScopes[gatewayKey] = sets.New[string]()
+					}
+					claimedScopes[gatewayKey].Insert(scopeKey)
+
+					// Translate sections that have not yet been targeted
+					var (
+						errs                   error
+						http3DisabledListeners []string
+					)
+					for _, l := range gateway.listeners {
+						if policyTargetsLS && !listenersBelongToLS(l, ls) {
+							continue
+						}
+						// Skip if section has already been targeted. Use a scope-qualified key
+						// so that same-named listeners across different ListenerSets (or a
+						// Gateway listener with the same name) do not incorrectly block each other.
+						var lSectionKey string
+						if l.isFromListenerSet() {
+							lSectionKey = fmt.Sprintf("%s%s", lsPrefix(l.listenerSet), string(l.Name))
+						} else {
+							lSectionKey = string(l.Name)
+						}
+						if claimedSections[gatewayKey].Has(lSectionKey) {
+							continue
+						}
+
+						// Find IR
+						irKey := t.getIRKey(l.gateway.Gateway)
+						// It must exist since we've already finished processing the gateways
+						gwXdsIR := xdsIR[irKey]
+						scope := scopeEntireGateway
+						if policyTargetsLS {
+							scope = scopeEntireListenerSet
+						}
+						if err := validatePortOverlapForClientTrafficPolicy(l, gwXdsIR, scope); err != nil {
+							errs = errors.Join(errs, err)
+						} else {
+							if shouldDisableHTTP3ForClientValidation(policy, gwXdsIR.GetHTTPListener(irListenerName(l))) {
+								http3DisabledListeners = append(http3DisabledListeners, string(l.Name))
+							}
+							if err := t.translateClientTrafficPolicyForListener(policy, l, xdsIR, infraIR, resources); err != nil {
+								errs = errors.Join(errs, err)
+							}
+							if policyTargetsLS {
+								if claimedSections[gatewayKey] == nil {
+									claimedSections[gatewayKey] = sets.New[string]()
+								}
+								claimedSections[gatewayKey].Insert(fmt.Sprintf("%s%s", lsPrefix(ls), string(l.Name)))
+							}
+						}
+					}
+
+					// Set conditions for translation error if it got any
+					if errs != nil {
+						status.SetTranslationErrorForPolicyAncestor(&policy.Status,
+							&ancestorRef,
+							t.GatewayControllerName,
+							policy.Generation,
+							status.Error2ConditionMsg(errs),
+						)
+					}
+
+					// Set Accepted condition if it is unset
+					status.SetAcceptedForPolicyAncestor(&policy.Status, &ancestorRef, t.GatewayControllerName, policy.Generation)
+
+					// Set Warning condition if HTTP/3 was disabled for the listener
+					if len(http3DisabledListeners) > 0 {
+						status.SetWarningForPolicyAncestor(&policy.Status, &ancestorRef, t.GatewayControllerName,
+							status.PolicyReasonUnsupportedHTTP3ClientValidation, disabledHTTP3WarningMessage(http3DisabledListeners), policy.Generation)
+					}
+
+					// Check for deprecated fields and set warning if any are found
+					if deprecatedFields := deprecatedFieldsUsedInClientTrafficPolicy(policy); len(deprecatedFields) > 0 {
+						status.SetDeprecatedFieldsWarningForPolicyAncestor(&policy.Status, &ancestorRef, t.GatewayControllerName, policy.Generation, deprecatedFields)
 					}
 				}
-
-				// Set conditions for translation error if it got any
-				if errs != nil {
-					status.SetTranslationErrorForPolicyAncestors(&policy.Status,
-						ancestorRefs,
-						t.GatewayControllerName,
-						policy.Generation,
-						status.Error2ConditionMsg(errs),
-					)
-				}
-
-				// Set Accepted condition if it is unset
-				status.SetAcceptedForPolicyAncestors(&policy.Status, ancestorRefs, t.GatewayControllerName, policy.Generation)
 			}
 		}
 	}
 
+	for _, policy := range res {
+		// Truncate Ancestor list of longer than 16
+		if len(policy.Status.Ancestors) > 16 {
+			status.TruncatePolicyAncestors(&policy.Status, t.GatewayControllerName, policy.Generation)
+		}
+	}
 	return res
 }
 
-func resolveCTPolicyTargetRef(
-	policy *egv1a1.ClientTrafficPolicy,
-	targetRef *gwapiv1a2.LocalPolicyTargetReferenceWithSectionName,
+// ctpResolvedTarget is the result of resolving a ClientTrafficPolicy targetRef.
+// listenerSet is non-nil when the target is a ListenerSet rather than a Gateway directly.
+type ctpResolvedTarget struct {
+	gateway     *GatewayContext
+	listenerSet *gwapiv1.ListenerSet
+}
+
+func lsPrefix(ls *gwapiv1.ListenerSet) string {
+	return fmt.Sprintf("%s/%s/", ls.Namespace, ls.Name)
+}
+
+func resolveClientTrafficPolicyTargetRef(
+	targetRef *policyTargetReferenceWithSectionName,
 	gateways map[types.NamespacedName]*policyGatewayTargetContext,
-) (*GatewayContext, *status.PolicyResolveError) {
-	// Check if the gateway exists
+	listenerSets map[types.NamespacedName]*gwapiv1.ListenerSet,
+) (*ctpResolvedTarget, *status.PolicyResolveError) {
+	if targetRef.Kind == resource.KindListenerSet {
+		targetKey := types.NamespacedName{Name: string(targetRef.Name), Namespace: string(targetRef.Namespace)}
+		ls, ok := listenerSets[targetKey]
+		if !ok {
+			return nil, nil
+		}
+
+		parentNamespace := NamespaceDerefOr(ls.Spec.ParentRef.Namespace, ls.Namespace)
+		gatewayKey := types.NamespacedName{
+			Namespace: parentNamespace,
+			Name:      string(ls.Spec.ParentRef.Name),
+		}
+		gateway, ok := gateways[gatewayKey]
+		if !ok {
+			return nil, nil
+		}
+
+		if targetRef.SectionName != nil {
+			foundListenerInSection := false
+			for i := range ls.Spec.Listeners {
+				if ls.Spec.Listeners[i].Name == *targetRef.SectionName {
+					foundListenerInSection = true
+					break
+				}
+			}
+			if !foundListenerInSection {
+				return &ctpResolvedTarget{gateway.GatewayContext, ls}, &status.PolicyResolveError{
+					Reason: gwapiv1.PolicyReasonTargetNotFound,
+					Message: fmt.Sprintf("ListenerSet %s/%s does not have a listener named %q",
+						ls.Namespace, ls.Name, *targetRef.SectionName),
+				}
+			}
+		}
+
+		return &ctpResolvedTarget{gateway.GatewayContext, ls}, nil
+	}
+
+	// Gateway target
 	key := types.NamespacedName{
 		Name:      string(targetRef.Name),
-		Namespace: policy.Namespace,
+		Namespace: string(targetRef.Namespace),
 	}
 	gateway, ok := gateways[key]
-
-	// Gateway not found
 	if !ok {
 		return nil, nil
 	}
@@ -309,14 +518,18 @@ func resolveCTPolicyTargetRef(
 			key,
 			gateway.listeners,
 		); err != nil {
-			return gateway.GatewayContext, err
+			return &ctpResolvedTarget{gateway: gateway.GatewayContext}, err
 		}
 	}
 
-	return gateway.GatewayContext, nil
+	return &ctpResolvedTarget{gateway: gateway.GatewayContext}, nil
 }
 
-func validatePortOverlapForClientTrafficPolicy(l *ListenerContext, xds *ir.Xds, attachedToGateway bool) error {
+func listenersBelongToLS(l *ListenerContext, ls *gwapiv1.ListenerSet) bool {
+	return l.isFromListenerSet() && l.listenerSet.Name == ls.Name && l.listenerSet.Namespace == ls.Namespace
+}
+
+func validatePortOverlapForClientTrafficPolicy(l *ListenerContext, xds *ir.Xds, scope ctpAttachScope) error {
 	// Find Listener IR
 	irListenerName := irListenerName(l)
 	var httpIR *ir.HTTPListener
@@ -332,22 +545,27 @@ func validatePortOverlapForClientTrafficPolicy(l *ListenerContext, xds *ir.Xds, 
 		// Get a list of all other non-TLS listeners on this Gateway that share a port with
 		// the listener in question.
 		if sameListeners := listenersWithSameHTTPPort(xds, httpIR); len(sameListeners) != 0 {
-			if attachedToGateway {
-				// If this policy is attached to an entire gateway and the mergeGateways feature
-				// is turned on, validate that all the listeners affected by this policy originated
-				// from the same Gateway resource. The name of the Gateway from which this listener
-				// originated is part of the listener's name by construction.
-				gatewayName := irListenerName[0:strings.LastIndex(irListenerName, "/")]
+			switch scope {
+			case scopeEntireGateway, scopeEntireListenerSet:
+				// When mergeGateways is enabled, the XDS IR may contain listeners from multiple
+				// Gateway resources and their ListenerSets. Validate that all same-port listeners
+				// originated from the same target. The origin is encoded in the listener name by construction.
+				var prefix string
+				if scope == scopeEntireGateway {
+					prefix = extractGatewayNameFromListener(irListenerName)
+				} else {
+					prefix = extractListenerSetPrefixFromListener(irListenerName)
+				}
 				conflictingListeners := []string{}
 				for _, currName := range sameListeners {
-					if strings.Index(currName, gatewayName) != 0 {
+					if strings.Index(currName, prefix) != 0 {
 						conflictingListeners = append(conflictingListeners, currName)
 					}
 				}
 				if len(conflictingListeners) != 0 {
 					return fmt.Errorf("ClientTrafficPolicy is being applied to multiple http (non https) listeners (%s) on the same port, which is not allowed", strings.Join(conflictingListeners, ", "))
 				}
-			} else {
+			default:
 				// If this policy is attached to a specific listener, any other listeners in the list
 				// would be affected by this policy but should not be, so this policy can't be accepted.
 				return fmt.Errorf("ClientTrafficPolicy is being applied to multiple http (non https) listeners (%s) on the same port, which is not allowed", strings.Join(sameListeners, ", "))
@@ -357,7 +575,42 @@ func validatePortOverlapForClientTrafficPolicy(l *ListenerContext, xds *ir.Xds, 
 	return nil
 }
 
-func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.ClientTrafficPolicy, l *ListenerContext,
+// shouldDisableHTTP3ForClientValidation checks if HTTP/3 should be disabled for a listener
+// because envoy does not support downstream client TLS validation over QUIC yet.
+// https://github.com/envoyproxy/envoy/blob/11299f21b37743680a715819ef7e16d12a4d8b8d/source/common/quic/quic_server_transport_socket_factory.cc#L27-L29
+func shouldDisableHTTP3ForClientValidation(policy *egv1a1.ClientTrafficPolicy, httpIR *ir.HTTPListener) bool {
+	if httpIR == nil || httpIR.TLS == nil {
+		return false
+	}
+	if policy.Spec.HTTP3 == nil {
+		return false
+	}
+	if policy.Spec.TLS == nil || policy.Spec.TLS.ClientValidation == nil {
+		return false
+	}
+	return true
+}
+
+func disabledHTTP3WarningMessage(listenerNames []string) string {
+	if len(listenerNames) == 0 {
+		return ""
+	}
+
+	target := fmt.Sprintf("listener %q", listenerNames[0])
+
+	if len(listenerNames) > 1 {
+		sort.Strings(listenerNames)
+		target = fmt.Sprintf("listeners %v", listenerNames)
+	}
+
+	return fmt.Sprintf(
+		"HTTP/3 was disabled for %s because Envoy does not support downstream client TLS validation over QUIC",
+		target,
+	)
+}
+
+func (t *Translator) translateClientTrafficPolicyForListener(
+	policy *egv1a1.ClientTrafficPolicy, l *ListenerContext,
 	xdsIR resource.XdsIRMap, infraIR resource.InfraIRMap, resources *resource.Resources,
 ) error {
 	// Find IR
@@ -386,12 +639,12 @@ func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.Clie
 
 	// HTTP and TCP listeners can both be configured by common fields below.
 	var (
-		keepalive           *ir.TCPKeepalive
-		connection          *ir.ClientConnection
-		tlsConfig           *ir.TLSConfig
-		enableProxyProtocol bool
-		timeout             *ir.ClientTimeout
-		err, errs           error
+		keepalive     *ir.TCPKeepalive
+		connection    *ir.ClientConnection
+		tlsConfig     *ir.TLSConfig
+		proxyProtocol *ir.ProxyProtocolSettings
+		timeout       *ir.ClientTimeout
+		err, errs     error
 	)
 
 	// Build common IR shared by HTTP and TCP listeners, return early if some field is invalid.
@@ -410,7 +663,18 @@ func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.Clie
 	}
 
 	// Translate Proxy Protocol
-	enableProxyProtocol = ptr.Deref(policy.Spec.EnableProxyProtocol, false)
+	if policy.Spec.ProxyProtocol != nil {
+		// ProxyProtocol field takes precedence when configured
+		// Even if it's an empty object {}, we should enable proxy protocol with default settings
+		proxyProtocol = &ir.ProxyProtocolSettings{
+			Optional: ptr.Deref(policy.Spec.ProxyProtocol.Optional, false),
+		}
+	} else if ptr.Deref(policy.Spec.EnableProxyProtocol, false) {
+		// Fallback to legacy EnableProxyProtocol field
+		proxyProtocol = &ir.ProxyProtocolSettings{
+			Optional: false, // Default behavior for legacy field
+		}
+	}
 
 	// Translate Client Timeout Settings
 	timeout, err = buildClientTimeout(policy.Spec.Timeout)
@@ -434,22 +698,22 @@ func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.Clie
 		translatePathSettings(policy.Spec.Path, httpIR)
 
 		// Translate HTTP1 Settings
-		if err = translateHTTP1Settings(policy.Spec.HTTP1, httpIR); err != nil {
+		if err = translateHTTP1Settings(policy.Spec.HTTP1, connection, httpIR); err != nil {
 			err = perr.WithMessage(err, "HTTP1")
 			errs = errors.Join(errs, err)
 		}
 
 		// Translate HTTP2 Settings
-		if err = translateHTTP2Settings(policy.Spec.HTTP2, httpIR); err != nil {
+		if h2, err := buildIRHTTP2Settings(policy.Spec.HTTP2); err != nil {
 			err = perr.WithMessage(err, "HTTP2")
 			errs = errors.Join(errs, err)
+		} else {
+			httpIR.HTTP2 = h2
 		}
 
 		// enable http3 if set and TLS is enabled
-		if httpIR.TLS != nil && policy.Spec.HTTP3 != nil {
-			http3 := &ir.HTTP3Settings{
-				QUICPort: int32(l.Port),
-			}
+		if httpIR.TLS != nil && policy.Spec.HTTP3 != nil && !shouldDisableHTTP3ForClientValidation(policy, httpIR) {
+			http3 := &ir.HTTP3Settings{}
 			httpIR.HTTP3 = http3
 			var proxyListenerIR *ir.ProxyListener
 			for _, proxyListener := range infraIR[irKey].Proxy.Listeners {
@@ -463,8 +727,14 @@ func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.Clie
 			}
 		}
 
+		// Translate GRPC Settings
+		translateGRPCSettings(policy.Spec.GRPC, httpIR)
+
 		// Translate Health Check Settings
 		translateHealthCheckSettings(policy.Spec.HealthCheck, httpIR)
+
+		// Translate Scheme Header Transformation
+		translateSchemeHeaderTransform(policy.Spec.Scheme, httpIR)
 
 		// Translate TLS parameters
 		tlsConfig, err = t.buildListenerTLSParameters(policy, httpIR.TLS, resources)
@@ -475,18 +745,27 @@ func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.Clie
 
 		// Early return if got any errors
 		if errs != nil {
+			routesWithDirectResponse := sets.New[string]()
 			for _, route := range httpIR.Routes {
 				// Return a 500 direct response
 				route.DirectResponse = &ir.CustomResponse{
-					StatusCode: ptr.To(uint32(500)),
+					StatusCode: new(uint32(500)),
 				}
+				routesWithDirectResponse.Insert(route.Name)
+			}
+			if len(httpIR.Routes) > 0 {
+				t.Logger.Info("setting 500 direct response in routes due to errors in ClientTrafficPolicy",
+					"policy", utils.NamespacedName(policy),
+					"routes", sets.List(routesWithDirectResponse),
+					"error", errs,
+				)
 			}
 			return errs
 		}
 
 		httpIR.TCPKeepalive = keepalive
 		httpIR.Connection = connection
-		httpIR.EnableProxyProtocol = enableProxyProtocol
+		httpIR.ProxyProtocol = proxyProtocol
 		httpIR.Timeout = timeout
 		httpIR.TLS = tlsConfig
 	}
@@ -509,7 +788,7 @@ func (t *Translator) translateClientTrafficPolicyForListener(policy *egv1a1.Clie
 
 		tcpIR.TCPKeepalive = keepalive
 		tcpIR.Connection = connection
-		tcpIR.EnableProxyProtocol = enableProxyProtocol
+		tcpIR.ProxyProtocol = proxyProtocol
 		tcpIR.TLS = tlsConfig
 		tcpIR.Timeout = timeout
 	}
@@ -534,7 +813,7 @@ func buildKeepAlive(tcpKeepAlive *egv1a1.TCPKeepalive) (*ir.TCPKeepalive, error)
 		if err != nil {
 			return nil, fmt.Errorf("invalid IdleTime value %s", *tcpKeepAlive.IdleTime)
 		}
-		irTCPKeepalive.IdleTime = ptr.To(uint32(d.Seconds()))
+		irTCPKeepalive.IdleTime = new(uint32(d.Seconds()))
 	}
 
 	if tcpKeepAlive.Interval != nil {
@@ -542,7 +821,7 @@ func buildKeepAlive(tcpKeepAlive *egv1a1.TCPKeepalive) (*ir.TCPKeepalive, error)
 		if err != nil {
 			return nil, fmt.Errorf("invalid Interval value %s", *tcpKeepAlive.Interval)
 		}
-		irTCPKeepalive.Interval = ptr.To(uint32(d.Seconds()))
+		irTCPKeepalive.Interval = new(uint32(d.Seconds()))
 	}
 
 	return irTCPKeepalive, nil
@@ -575,9 +854,7 @@ func buildClientTimeout(clientTimeout *egv1a1.ClientTimeout) (*ir.ClientTimeout,
 			if err != nil {
 				return nil, fmt.Errorf("invalid TCP IdleTimeout value %s", *clientTimeout.TCP.IdleTimeout)
 			}
-			irTCPTimeout.IdleTimeout = &metav1.Duration{
-				Duration: d,
-			}
+			irTCPTimeout.IdleTimeout = ir.MetaV1DurationPtr(d)
 		}
 		irClientTimeout.TCP = irTCPTimeout
 	}
@@ -589,9 +866,7 @@ func buildClientTimeout(clientTimeout *egv1a1.ClientTimeout) (*ir.ClientTimeout,
 			if err != nil {
 				return nil, fmt.Errorf("invalid HTTP RequestReceivedTimeout value %s", *clientTimeout.HTTP.RequestReceivedTimeout)
 			}
-			irHTTPTimeout.RequestReceivedTimeout = &metav1.Duration{
-				Duration: d,
-			}
+			irHTTPTimeout.RequestReceivedTimeout = ir.MetaV1DurationPtr(d)
 		}
 
 		if clientTimeout.HTTP.IdleTimeout != nil {
@@ -599,9 +874,7 @@ func buildClientTimeout(clientTimeout *egv1a1.ClientTimeout) (*ir.ClientTimeout,
 			if err != nil {
 				return nil, fmt.Errorf("invalid HTTP IdleTimeout value %s", *clientTimeout.HTTP.IdleTimeout)
 			}
-			irHTTPTimeout.IdleTimeout = &metav1.Duration{
-				Duration: d,
-			}
+			irHTTPTimeout.IdleTimeout = ir.MetaV1DurationPtr(d)
 		}
 
 		if clientTimeout.HTTP.StreamIdleTimeout != nil {
@@ -609,9 +882,7 @@ func buildClientTimeout(clientTimeout *egv1a1.ClientTimeout) (*ir.ClientTimeout,
 			if err != nil {
 				return nil, fmt.Errorf("invalid HTTP StreamIdleTimeout value %s", *clientTimeout.HTTP.StreamIdleTimeout)
 			}
-			irHTTPTimeout.StreamIdleTimeout = &metav1.Duration{
-				Duration: d,
-			}
+			irHTTPTimeout.StreamIdleTimeout = ir.MetaV1DurationPtr(d)
 		}
 		irClientTimeout.HTTP = irHTTPTimeout
 	}
@@ -640,7 +911,7 @@ func translateListenerHeaderSettings(headerSettings *egv1a1.HeaderSettings, http
 	if headerSettings.RequestID != nil {
 		httpIR.Headers.RequestID = (*ir.RequestIDAction)(headerSettings.RequestID)
 	} else if headerSettings.PreserveXRequestID != nil && *headerSettings.PreserveXRequestID {
-		httpIR.Headers.RequestID = ptr.To(ir.RequestIDActionPreserve)
+		httpIR.Headers.RequestID = new(ir.RequestIDActionPreserveOrGenerate)
 	}
 
 	if headerSettings.XForwardedClientCert != nil {
@@ -654,25 +925,52 @@ func translateListenerHeaderSettings(headerSettings *egv1a1.HeaderSettings, http
 		}
 	}
 
+	var errs error
+
 	if headerSettings.EarlyRequestHeaders != nil {
-		headersToAdd, headersToRemove, err := translateEarlyRequestHeaders(headerSettings.EarlyRequestHeaders)
+		headersToAdd, headersToRemove, removeOnMatch, err := translateHeaderModifier(headerSettings.EarlyRequestHeaders, "EarlyRequestHeaders")
 		if err != nil {
-			return err
+			errs = errors.Join(errs, err)
 		}
 		httpIR.Headers.EarlyAddRequestHeaders = headersToAdd
 		httpIR.Headers.EarlyRemoveRequestHeaders = headersToRemove
+		httpIR.Headers.EarlyRemoveRequestHeadersOnMatch = removeOnMatch
 	}
-	return nil
+
+	if headerSettings.LateResponseHeaders != nil {
+		headersToAdd, headersToRemove, removeOnMatch, err := translateHeaderModifier(headerSettings.LateResponseHeaders, "LateResponseHeaders")
+		if err != nil {
+			errs = errors.Join(errs, err)
+		}
+		httpIR.Headers.LateAddResponseHeaders = headersToAdd
+		httpIR.Headers.LateRemoveResponseHeaders = headersToRemove
+		httpIR.Headers.LateRemoveResponseHeadersOnMatch = removeOnMatch
+	}
+
+	return errs
 }
 
-func translateHTTP1Settings(http1Settings *egv1a1.HTTP1Settings, httpIR *ir.HTTPListener) error {
+func translateHTTP1Settings(http1Settings *egv1a1.HTTP1Settings, connection *ir.ClientConnection, httpIR *ir.HTTPListener) error {
 	if http1Settings == nil {
 		return nil
 	}
-	httpIR.HTTP1 = &ir.HTTP1Settings{
-		EnableTrailers:     ptr.Deref(http1Settings.EnableTrailers, false),
-		PreserveHeaderCase: ptr.Deref(http1Settings.PreserveHeaderCase, false),
+	ignoreUpgrade := make([]*ir.StringMatch, 0, len(http1Settings.IgnoredUpgradeTypes))
+	for _, match := range http1Settings.IgnoredUpgradeTypes {
+		ignoreUpgrade = append(ignoreUpgrade, irStringMatch("", match))
 	}
+	httpIR.HTTP1 = &ir.HTTP1Settings{
+		EnableTrailers:      ptr.Deref(http1Settings.EnableTrailers, false),
+		PreserveHeaderCase:  ptr.Deref(http1Settings.PreserveHeaderCase, false),
+		IgnoredUpgradeTypes: ignoreUpgrade,
+	}
+	if connection != nil {
+		if connection.ConnectionLimit != nil {
+			if connection.ConnectionLimit.MaxConnectionDuration != nil {
+				httpIR.HTTP1.DisableSafeMaxConnectionDuration = ptr.Deref(http1Settings.DisableSafeMaxConnectionDuration, false)
+			}
+		}
+	}
+
 	if http1Settings.HTTP10 != nil {
 		var defaultHost *string
 		if ptr.Deref(http1Settings.HTTP10.UseDefaultHost, false) {
@@ -695,7 +993,7 @@ func translateHTTP1Settings(http1Settings *egv1a1.HTTP1Settings, httpIR *ir.HTTP
 						numMatchingRoutes++
 						// make the linter happy
 						theHost := route.Hostname
-						defaultHost = ptr.To(theHost)
+						defaultHost = new(theHost)
 					}
 					if numMatchingRoutes > 1 {
 						break
@@ -717,50 +1015,15 @@ func translateHTTP1Settings(http1Settings *egv1a1.HTTP1Settings, httpIR *ir.HTTP
 	return nil
 }
 
-func translateHTTP2Settings(http2Settings *egv1a1.HTTP2Settings, httpIR *ir.HTTPListener) error {
-	if http2Settings == nil {
-		return nil
+func translateGRPCSettings(grpcSettings *egv1a1.GRPCSettings, httpIR *ir.HTTPListener) {
+	// Return early if not set
+	if grpcSettings == nil {
+		return
 	}
-
-	var (
-		http2 = &ir.HTTP2Settings{}
-		errs  error
-	)
-
-	if http2Settings.InitialStreamWindowSize != nil {
-		initialStreamWindowSize, ok := http2Settings.InitialStreamWindowSize.AsInt64()
-		switch {
-		case !ok:
-			errs = errors.Join(errs, fmt.Errorf("invalid InitialStreamWindowSize value %s", http2Settings.InitialStreamWindowSize.String()))
-		case initialStreamWindowSize < MinHTTP2InitialStreamWindowSize || initialStreamWindowSize > MaxHTTP2InitialStreamWindowSize:
-			errs = errors.Join(errs, fmt.Errorf("InitialStreamWindowSize value %s is out of range, must be between %d and %d",
-				http2Settings.InitialStreamWindowSize.String(),
-				MinHTTP2InitialStreamWindowSize,
-				MaxHTTP2InitialStreamWindowSize))
-		default:
-			http2.InitialStreamWindowSize = ptr.To(uint32(initialStreamWindowSize))
-		}
+	if httpIR.GRPC == nil {
+		httpIR.GRPC = &ir.GRPCSettings{}
 	}
-
-	if http2Settings.InitialConnectionWindowSize != nil {
-		initialConnectionWindowSize, ok := http2Settings.InitialConnectionWindowSize.AsInt64()
-		switch {
-		case !ok:
-			errs = errors.Join(errs, fmt.Errorf("invalid InitialConnectionWindowSize value %s", http2Settings.InitialConnectionWindowSize.String()))
-		case initialConnectionWindowSize < MinHTTP2InitialConnectionWindowSize || initialConnectionWindowSize > MaxHTTP2InitialConnectionWindowSize:
-			errs = errors.Join(errs, fmt.Errorf("InitialConnectionWindowSize value %s is out of range, must be between %d and %d",
-				http2Settings.InitialConnectionWindowSize.String(),
-				MinHTTP2InitialConnectionWindowSize,
-				MaxHTTP2InitialConnectionWindowSize))
-		default:
-			http2.InitialConnectionWindowSize = ptr.To(uint32(initialConnectionWindowSize))
-		}
-	}
-
-	http2.MaxConcurrentStreams = http2Settings.MaxConcurrentStreams
-
-	httpIR.HTTP2 = http2
-	return errs
+	httpIR.GRPC.EnableGRPCWeb = grpcSettings.EnableWeb
 }
 
 func translateHealthCheckSettings(healthCheckSettings *egv1a1.HealthCheckSettings, httpIR *ir.HTTPListener) {
@@ -772,7 +1035,20 @@ func translateHealthCheckSettings(healthCheckSettings *egv1a1.HealthCheckSetting
 	httpIR.HealthCheck = (*ir.HealthCheckSettings)(healthCheckSettings)
 }
 
-func (t *Translator) buildListenerTLSParameters(policy *egv1a1.ClientTrafficPolicy,
+func translateSchemeHeaderTransform(scheme *egv1a1.SchemeHeaderTransform, httpIR *ir.HTTPListener) {
+	// Return early if not set or if set to Preserve (default behavior)
+	if scheme == nil || *scheme == egv1a1.SchemeHeaderTransformPreserve {
+		return
+	}
+
+	// Set MatchBackendScheme to true when scheme is set to MatchBackend
+	if *scheme == egv1a1.SchemeHeaderTransformMatchBackend {
+		httpIR.MatchBackendScheme = true
+	}
+}
+
+func (t *Translator) buildListenerTLSParameters(
+	policy *egv1a1.ClientTrafficPolicy,
 	irTLSConfig *ir.TLSConfig, resources *resource.Resources,
 ) (*ir.TLSConfig, error) {
 	// Return if this listener isn't a TLS listener. There has to be
@@ -786,8 +1062,8 @@ func (t *Translator) buildListenerTLSParameters(policy *egv1a1.ClientTrafficPoli
 
 	// Make sure that the negotiated TLS protocol version is as expected if TLS is used,
 	// regardless of if TLS parameters were used in the ClientTrafficPolicy or not
-	irTLSConfig.MinVersion = ptr.To(ir.TLSv12)
-	irTLSConfig.MaxVersion = ptr.To(ir.TLSv13)
+	irTLSConfig.MinVersion = new(ir.TLSv12)
+	irTLSConfig.MaxVersion = new(ir.TLSv13)
 
 	// Return early if not set
 	if tlsParams == nil {
@@ -802,12 +1078,15 @@ func (t *Translator) buildListenerTLSParameters(policy *egv1a1.ClientTrafficPoli
 	}
 
 	if tlsParams.MinVersion != nil {
-		irTLSConfig.MinVersion = ptr.To(ir.TLSVersion(*tlsParams.MinVersion))
+		irTLSConfig.MinVersion = new(ir.TLSVersion(*tlsParams.MinVersion))
 	}
 	if tlsParams.MaxVersion != nil {
-		irTLSConfig.MaxVersion = ptr.To(ir.TLSVersion(*tlsParams.MaxVersion))
+		irTLSConfig.MaxVersion = new(ir.TLSVersion(*tlsParams.MaxVersion))
 	}
 	if len(tlsParams.Ciphers) > 0 {
+		if err := validateCipherSuites(tlsParams.Ciphers); err != nil {
+			return nil, err
+		}
 		irTLSConfig.Ciphers = tlsParams.Ciphers
 	}
 	if len(tlsParams.ECDHCurves) > 0 {
@@ -817,6 +1096,13 @@ func (t *Translator) buildListenerTLSParameters(policy *egv1a1.ClientTrafficPoli
 		irTLSConfig.SignatureAlgorithms = tlsParams.SignatureAlgorithms
 	}
 
+	if tlsParams.Fingerprints != nil {
+		irTLSConfig.Fingerprints = make([]ir.TLSFingerprintType, len(tlsParams.Fingerprints))
+		for i := range tlsParams.Fingerprints {
+			irTLSConfig.Fingerprints[i] = (ir.TLSFingerprintType)(tlsParams.Fingerprints[i])
+		}
+	}
+
 	if tlsParams.ClientValidation != nil {
 		from := crossNamespaceFrom{
 			group:     egv1a1.GroupName,
@@ -824,58 +1110,78 @@ func (t *Translator) buildListenerTLSParameters(policy *egv1a1.ClientTrafficPoli
 			namespace: policy.Namespace,
 		}
 
+		// Determine the effective client validation mode.
+		mode := egv1a1.ClientValidationRequireAndVerify
+		if tlsParams.ClientValidation.Mode != nil {
+			mode = *tlsParams.ClientValidation.Mode
+		} else if tlsParams.ClientValidation.Optional {
+			// Legacy mapping: Optional=true means VerifyIfGiven.
+			mode = egv1a1.ClientValidationVerifyIfGiven
+		}
+
+		irTLSConfig.ClientValidationEnabled = true
+		convertClientValidationModeType(mode, irTLSConfig)
+
 		irCACert := &ir.TLSCACertificate{
 			Name: irTLSCACertName(policy.Namespace, policy.Name),
 		}
 
+		seenCACerts := make(map[[sha256.Size]byte]struct{})
 		for _, caCertRef := range tlsParams.ClientValidation.CACertificateRefs {
-			if caCertRef.Kind == nil || string(*caCertRef.Kind) == resource.KindSecret { // nolint
-				secret, err := t.validateSecretRef(false, from, caCertRef, resources)
-				if err != nil {
-					return irTLSConfig, err
-				}
-
-				secretBytes, ok := getCaCertFromSecret(secret)
-				if !ok || len(secretBytes) == 0 {
-					return irTLSConfig, fmt.Errorf(
-						"caCertificateRef not found in secret %s", caCertRef.Name)
-				}
-
-				if err := validateCertificate(secretBytes); err != nil {
-					return irTLSConfig, fmt.Errorf(
-						"invalid certificate in secret %s: %w", caCertRef.Name, err)
-				}
-
-				irCACert.Certificate = append(irCACert.Certificate, secretBytes...)
-
-			} else if string(*caCertRef.Kind) == resource.KindConfigMap {
-				configMap, err := t.validateConfigMapRef(false, from, caCertRef, resources)
-				if err != nil {
-					return irTLSConfig, err
-				}
-
-				configMapBytes, ok := getCaCertFromConfigMap(configMap)
-				if !ok || len(configMapBytes) == 0 {
-					return irTLSConfig, fmt.Errorf(
-						"caCertificateRef not found in configMap %s", caCertRef.Name)
-				}
-
-				if err := validateCertificate([]byte(configMapBytes)); err != nil {
-					return irTLSConfig, fmt.Errorf(
-						"invalid certificate in configmap %s: %w", caCertRef.Name, err)
-				}
-
-				irCACert.Certificate = append(irCACert.Certificate, configMapBytes...)
-			} else {
-				return irTLSConfig, fmt.Errorf(
-					"unsupported caCertificateRef kind:%s", string(*caCertRef.Kind))
+			caCertBytes, err := t.validateAndGetDataAtKeyInRef(caCertRef, CACertKey, resources, from)
+			if err != nil {
+				return irTLSConfig, fmt.Errorf("failed to get certificate from ref: %w", err)
 			}
+			validCaCertBytes, listenerErr := filterValidCertificates(caCertBytes)
+			if listenerErr != nil {
+				if listenerErr.Reason() == gwapiv1.ListenerReasonInvalidCertificateRef {
+					return irTLSConfig, fmt.Errorf("no valid certificates exist in %s: %w", caCertRef.Name, listenerErr)
+				} else if listenerErr.Reason() == status.ListenerReasonPartiallyInvalidCertificateRef {
+					t.Logger.Sugar().Warn("some certificates are invalid but proceeding with valid ones",
+						"policy", utils.NamespacedName(policy),
+						"certificate", caCertRef.Name,
+						"error", listenerErr.Error(),
+					)
+				}
+			}
+			irCACert.Certificate = appendDedupPEMCertsWithSeen(irCACert.Certificate, validCaCertBytes, seenCACerts)
 		}
 
+		// CA certificates are required for verification modes.
+		if (mode == egv1a1.ClientValidationVerifyIfGiven || mode == egv1a1.ClientValidationRequireAndVerify) && len(irCACert.Certificate) == 0 {
+			if tlsParams.ClientValidation.Mode == nil && tlsParams.ClientValidation.Optional {
+				return irTLSConfig, fmt.Errorf(`tls.clientValidation.optional=true requires caCertificateRefs (maps to mode %q)`, mode)
+			}
+			return irTLSConfig, fmt.Errorf(`tls.clientValidation.mode %q requires caCertificateRefs`, mode)
+		}
 		if len(irCACert.Certificate) > 0 {
 			irTLSConfig.CACertificate = irCACert
-			irTLSConfig.RequireClientCertificate = !tlsParams.ClientValidation.Optional
-			setTLSClientValidationContext(tlsParams.ClientValidation, irTLSConfig)
+		}
+
+		// Apply additional validation context fields (SPKI/cert hashes and SAN matchers) regardless of CA presence.
+		setTLSClientValidationContext(tlsParams.ClientValidation, irTLSConfig)
+
+		irCrl := &ir.TLSCrl{
+			Name: irTLSCrlName(policy.Namespace, policy.Name),
+		}
+
+		if tlsParams.ClientValidation.Crl != nil {
+			for _, crlRef := range tlsParams.ClientValidation.Crl.Refs {
+				crlBytes, err := t.validateAndGetDataAtKeyInRef(crlRef, CRLKey, resources, from)
+				if err != nil {
+					return irTLSConfig, fmt.Errorf("failed to get crl from ref: %w", err)
+				}
+				if err := validateCrl(crlBytes); err != nil {
+					return irTLSConfig, fmt.Errorf("invalid crl in %s: %w", crlRef.Name, err)
+				}
+				irCrl.Data = append(irCrl.Data, crlBytes...)
+			}
+			if len(irCrl.Data) > 0 {
+				irTLSConfig.Crl = irCrl
+				if tlsParams.ClientValidation.Crl.OnlyVerifyLeafCertificate != nil {
+					irCrl.OnlyVerifyLeafCertificate = *tlsParams.ClientValidation.Crl.OnlyVerifyLeafCertificate
+				}
+			}
 		}
 	}
 
@@ -889,6 +1195,48 @@ func (t *Translator) buildListenerTLSParameters(policy *egv1a1.ClientTrafficPoli
 	}
 
 	return irTLSConfig, nil
+}
+
+// validateAndGetDataAtKeyInRef validates the secret object reference and gets the data at the key in the secret or configmap
+func (t *Translator) validateAndGetDataAtKeyInRef(
+	ref gwapiv1.SecretObjectReference,
+	key string,
+	resources *resource.Resources,
+	from crossNamespaceFrom,
+) ([]byte, error) {
+	refKind := string(ptr.Deref(ref.Kind, resource.KindSecret))
+	switch refKind {
+	case resource.KindSecret:
+		secret, err := t.validateSecretRef(true, from, ref, resources)
+		if err != nil {
+			return nil, err
+		}
+
+		secretCertBytes, ok := getOrFirstFromData(secret.Data, key)
+		if !ok || len(secretCertBytes) == 0 {
+			return nil, fmt.Errorf("ref secret [%s] has no key %s and more than one entry", ref.Name, key)
+		}
+		return secretCertBytes, nil
+	case resource.KindConfigMap:
+		configMap, err := t.validateConfigMapRef(true, from, ref, resources)
+		if err != nil {
+			return nil, err
+		}
+
+		configMapData, ok := getOrFirstFromData(configMap.Data, key)
+		if !ok || len(configMapData) == 0 {
+			return nil, fmt.Errorf("ref configmap [%s] has no key %s and more than one entry", ref.Name, key)
+		}
+		return []byte(configMapData), nil
+	case resource.KindClusterTrustBundle:
+		trustBundle := t.GetClusterTrustBundle(string(ref.Name))
+		if trustBundle == nil {
+			return nil, fmt.Errorf("ref ClusterTrustBundle [%s] not found", ref.Name)
+		}
+		return []byte(trustBundle.Spec.TrustBundle), nil
+	default:
+		return nil, fmt.Errorf("unsupported ref kind:%s", refKind)
+	}
 }
 
 func setTLSClientValidationContext(tlsClientValidation *egv1a1.ClientValidationContext, irTLSConfig *ir.TLSConfig) {
@@ -927,14 +1275,36 @@ func buildConnection(connection *egv1a1.ClientConnection) (*ir.ClientConnection,
 	if connection.ConnectionLimit != nil {
 		irConnectionLimit := &ir.ConnectionLimit{}
 
-		irConnectionLimit.Value = ptr.To(uint64(connection.ConnectionLimit.Value))
+		if connection.ConnectionLimit.Value != nil {
+			irConnectionLimit.Value = new(uint64(*connection.ConnectionLimit.Value))
+		}
 
 		if connection.ConnectionLimit.CloseDelay != nil {
 			d, err := time.ParseDuration(string(*connection.ConnectionLimit.CloseDelay))
 			if err != nil {
 				return nil, fmt.Errorf("invalid CloseDelay value %s", *connection.ConnectionLimit.CloseDelay)
 			}
-			irConnectionLimit.CloseDelay = ptr.To(metav1.Duration{Duration: d})
+			irConnectionLimit.CloseDelay = ir.MetaV1DurationPtr(d)
+		}
+
+		if connection.ConnectionLimit.MaxConnectionDuration != nil {
+			d, err := time.ParseDuration(string(*connection.ConnectionLimit.MaxConnectionDuration))
+			if err != nil {
+				return nil, fmt.Errorf("invalid MaxConnectionDuration value %s", *connection.ConnectionLimit.MaxConnectionDuration)
+			}
+			irConnectionLimit.MaxConnectionDuration = ir.MetaV1DurationPtr(d)
+		}
+
+		if connection.ConnectionLimit.MaxRequestsPerConnection != nil {
+			irConnectionLimit.MaxRequestsPerConnection = connection.ConnectionLimit.MaxRequestsPerConnection
+		}
+
+		if connection.ConnectionLimit.MaxStreamDuration != nil {
+			d, err := time.ParseDuration(string(*connection.ConnectionLimit.MaxStreamDuration))
+			if err != nil {
+				return nil, fmt.Errorf("invalid MaxStreamDuration value %s", *connection.ConnectionLimit.MaxStreamDuration)
+			}
+			irConnectionLimit.MaxStreamDuration = ir.MetaV1DurationPtr(d)
 		}
 
 		irConnection.ConnectionLimit = irConnectionLimit
@@ -949,49 +1319,49 @@ func buildConnection(connection *egv1a1.ClientConnection) (*ir.ClientConnection,
 			return nil, fmt.Errorf("BufferLimit value %s is out of range, must be between 0 and %d",
 				connection.BufferLimit.String(), math.MaxUint32)
 		}
-		irConnection.BufferLimitBytes = ptr.To(uint32(bufferLimit))
+		irConnection.BufferLimitBytes = new(uint32(bufferLimit))
+	}
+
+	if connection.MaxAcceptPerSocketEvent != nil {
+		irConnection.MaxAcceptPerSocketEvent = new(*connection.MaxAcceptPerSocketEvent)
 	}
 
 	return irConnection, nil
 }
 
-func translateEarlyRequestHeaders(headerModifier *gwapiv1.HTTPHeaderFilter) ([]ir.AddHeader, []string, error) {
+func translateHeaderModifier(headerModifier *egv1a1.HTTPHeaderFilter, modType string) ([]ir.AddHeader, []string, []*ir.StringMatch, error) {
 	// Make sure the header modifier config actually exists
 	if headerModifier == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	var errs error
-	emptyFilterConfig := true // keep track of whether the provided config is empty or not
 
-	var AddRequestHeaders []ir.AddHeader
-	var RemoveRequestHeaders []string
+	var addRequestHeaders []ir.AddHeader
+	var removeRequestHeaders []string
+	var removeRequestHeadersOnMatch []*ir.StringMatch
 
 	// Add request headers
 	if headersToAdd := headerModifier.Add; headersToAdd != nil {
-		if len(headersToAdd) > 0 {
-			emptyFilterConfig = false
-		}
 		for _, addHeader := range headersToAdd {
-			emptyFilterConfig = false
 			if addHeader.Name == "" {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot add a header with an empty name"))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot add a header with an empty name", modType))
 				// try to process the rest of the headers and produce a valid config.
 				continue
 			}
 			// Per Gateway API specification on HTTPHeaderName, : and / are invalid characters in header names
 			if strings.ContainsAny(string(addHeader.Name), "/:") {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot add a header with a '/' or ':' character in them. Header: '%q'", string(addHeader.Name)))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot add a header with a '/' or ':' character in them. Header: '%q'", modType, string(addHeader.Name)))
 				continue
 			}
 			// Gateway API specification allows only valid value as defined by RFC 7230
 			if !HeaderValueRegexp.MatchString(addHeader.Value) {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot add a header with an invalid value. Header: '%q'", string(addHeader.Name)))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot add a header with an invalid value. Header: '%q'", modType, string(addHeader.Name)))
 				continue
 			}
 			// Check if the header is a duplicate
 			headerKey := string(addHeader.Name)
 			canAddHeader := true
-			for _, h := range AddRequestHeaders {
+			for _, h := range addRequestHeaders {
 				if strings.EqualFold(h.Name, headerKey) {
 					canAddHeader = false
 					break
@@ -1005,39 +1375,36 @@ func translateEarlyRequestHeaders(headerModifier *gwapiv1.HTTPHeaderFilter) ([]i
 			newHeader := ir.AddHeader{
 				Name:   headerKey,
 				Append: true,
-				Value:  strings.Split(addHeader.Value, ","),
+				Value:  []string{addHeader.Value},
 			}
 
-			AddRequestHeaders = append(AddRequestHeaders, newHeader)
+			addRequestHeaders = append(addRequestHeaders, newHeader)
 		}
 	}
 
 	// Set headers
 	if headersToSet := headerModifier.Set; headersToSet != nil {
-		if len(headersToSet) > 0 {
-			emptyFilterConfig = false
-		}
 		for _, setHeader := range headersToSet {
 
 			if setHeader.Name == "" {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot set a header with an empty name"))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot set a header with an empty name", modType))
 				continue
 			}
 			// Per Gateway API specification on HTTPHeaderName, : and / are invalid characters in header names
 			if strings.ContainsAny(string(setHeader.Name), "/:") {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot set a header with a '/' or ':' character in them. Header: '%q'", string(setHeader.Name)))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot set a header with a '/' or ':' character in them. Header: '%q'", modType, string(setHeader.Name)))
 				continue
 			}
 			// Gateway API specification allows only valid value as defined by RFC 7230
 			if !HeaderValueRegexp.MatchString(setHeader.Value) {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot set a header with an invalid value. Header: '%q'", string(setHeader.Name)))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot set a header with an invalid value. Header: '%q'", modType, string(setHeader.Name)))
 				continue
 			}
 
 			// Check if the header to be set has already been configured
 			headerKey := string(setHeader.Name)
 			canAddHeader := true
-			for _, h := range AddRequestHeaders {
+			for _, h := range addRequestHeaders {
 				if strings.EqualFold(h.Name, headerKey) {
 					canAddHeader = false
 					break
@@ -1049,10 +1416,51 @@ func translateEarlyRequestHeaders(headerModifier *gwapiv1.HTTPHeaderFilter) ([]i
 			newHeader := ir.AddHeader{
 				Name:   string(setHeader.Name),
 				Append: false,
-				Value:  strings.Split(setHeader.Value, ","),
+				Value:  []string{setHeader.Value},
 			}
 
-			AddRequestHeaders = append(AddRequestHeaders, newHeader)
+			addRequestHeaders = append(addRequestHeaders, newHeader)
+		}
+	}
+
+	// AddIfAbsent headers
+	if headersToAddIfAbsent := headerModifier.AddIfAbsent; headersToAddIfAbsent != nil {
+		for _, addHeader := range headersToAddIfAbsent {
+			if addHeader.Name == "" {
+				errs = errors.Join(errs, fmt.Errorf("%s cannot addIfAbsent a header with an empty name", modType))
+				continue
+			}
+			// Per Gateway API specification on HTTPHeaderName, : and / are invalid characters in header names
+			if strings.ContainsAny(string(addHeader.Name), "/:") {
+				errs = errors.Join(errs, fmt.Errorf("%s cannot addIfAbsent a header with a '/' or ':' character in them. Header: '%q'", modType, string(addHeader.Name)))
+				continue
+			}
+			// Gateway API specification allows only valid value as defined by RFC 7230
+			if !HeaderValueRegexp.MatchString(addHeader.Value) {
+				errs = errors.Join(errs, fmt.Errorf("%s cannot addIfAbsent a header with an invalid value. Header: '%q'", modType, string(addHeader.Name)))
+				continue
+			}
+			// Check if the header is a duplicate
+			headerKey := string(addHeader.Name)
+			canAddHeader := true
+			for _, h := range addRequestHeaders {
+				if strings.EqualFold(h.Name, headerKey) {
+					canAddHeader = false
+					break
+				}
+			}
+
+			if !canAddHeader {
+				continue
+			}
+
+			newHeader := ir.AddHeader{
+				Name:        headerKey,
+				AddIfAbsent: true,
+				Value:       []string{addHeader.Value},
+			}
+
+			addRequestHeaders = append(addRequestHeaders, newHeader)
 		}
 	}
 
@@ -1060,17 +1468,14 @@ func translateEarlyRequestHeaders(headerModifier *gwapiv1.HTTPHeaderFilter) ([]i
 	// As far as Envoy is concerned, it is ok to configure a header to be added/set and also in the list of
 	// headers to remove. It will remove the original header if present and then add/set the header after.
 	if headersToRemove := headerModifier.Remove; headersToRemove != nil {
-		if len(headersToRemove) > 0 {
-			emptyFilterConfig = false
-		}
 		for _, removedHeader := range headersToRemove {
 			if removedHeader == "" {
-				errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders cannot remove a header with an empty name"))
+				errs = errors.Join(errs, fmt.Errorf("%s cannot remove a header with an empty name", modType))
 				continue
 			}
 
 			canRemHeader := true
-			for _, h := range RemoveRequestHeaders {
+			for _, h := range removeRequestHeaders {
 				if strings.EqualFold(h, removedHeader) {
 					canRemHeader = false
 					break
@@ -1080,14 +1485,37 @@ func translateEarlyRequestHeaders(headerModifier *gwapiv1.HTTPHeaderFilter) ([]i
 				continue
 			}
 
-			RemoveRequestHeaders = append(RemoveRequestHeaders, removedHeader)
+			removeRequestHeaders = append(removeRequestHeaders, removedHeader)
+		}
+	}
+
+	if matches := headerModifier.RemoveOnMatch; matches != nil {
+		for _, match := range matches {
+			// This is just a sanity check, since the CRD validation should prevent this from happening
+			if match.Value == "" {
+				errs = errors.Join(errs, fmt.Errorf("%s cannot remove a header with an empty matcher value", modType))
+				continue
+			}
+			removeRequestHeadersOnMatch = append(removeRequestHeadersOnMatch, irStringMatch("", match))
 		}
 	}
 
 	// Update the status if the filter failed to configure any valid headers to add/remove
-	if len(AddRequestHeaders) == 0 && len(RemoveRequestHeaders) == 0 && !emptyFilterConfig {
-		errs = errors.Join(errs, fmt.Errorf("EarlyRequestHeaders did not provide valid configuration to add/set/remove any headers"))
+	if len(addRequestHeaders) == 0 && len(removeRequestHeaders) == 0 && len(removeRequestHeadersOnMatch) == 0 {
+		errs = errors.Join(errs, fmt.Errorf("%s did not provide valid configuration to add/set/remove any headers", modType))
 	}
 
-	return AddRequestHeaders, RemoveRequestHeaders, errs
+	return addRequestHeaders, removeRequestHeaders, removeRequestHeadersOnMatch, errs
+}
+
+// clientTrafficPolicyCopiesWithStatusDeepCopy returns shallow copies with deep-copied Status fields.
+// Status is mutated during translation and shares a pointer with the watchable coalesce goroutine.
+func clientTrafficPolicyCopiesWithStatusDeepCopy(policies []*egv1a1.ClientTrafficPolicy) []*egv1a1.ClientTrafficPolicy {
+	copies := make([]*egv1a1.ClientTrafficPolicy, len(policies))
+	for i, p := range policies {
+		out := *p
+		p.Status.DeepCopyInto(&out.Status)
+		copies[i] = &out
+	}
+	return copies
 }

@@ -2,7 +2,6 @@ envoyProxyForGatewayClass:
   apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: EnvoyProxy
   metadata:
-    creationTimestamp: null
     name: default-envoy-proxy
     namespace: envoy-gateway-system
   spec:
@@ -24,6 +23,19 @@ envoyProxyForGatewayClass:
         node:
           locality:
             zone: $(ENVOY_SERVICE_ZONE)
+        deferredStatOptions:
+          enableDeferredCreationStats: true
+        stats_config:
+          use_all_default_tags: true
+          stats_tags:
+          - regex: \.zone(\.(([^\.]+)\.))
+            tag_name: from_zone
+          - regex: \.zone\.[^\.]+\.(([^\.]+)\.)
+            tag_name: to_zone
+          - regex: "^cluster(\\..+\\.(.+))\\.total_match_count$"
+            tag_name: socket_match_name
+          - regex: "circuit_breakers\\.((.+?)\\.).+"
+            tag_name: priority
         layered_runtime:
           layers:
           - name: global_config
@@ -41,9 +53,11 @@ envoyProxyForGatewayClass:
             set_node_on_first_message_only: true
           lds_config:
             ads: {}
+            initial_fetch_timeout: 0s
             resource_api_version: V3
           cds_config:
             ads: {}
+            initial_fetch_timeout: 0s
             resource_api_version: V3
         static_resources:
           listeners:
@@ -95,22 +109,22 @@ envoyProxyForGatewayClass:
                         address: 127.0.0.1
                         port_value: 19000
           - connect_timeout: 10s
-            lb_policy: ROUND_ROBIN
-            load_assignment:
-              cluster_name: local_cluster
-              endpoints:
-              - lb_endpoints:
-                - endpoint:
-                    address:
-                      socket_address:
-                        address: 127.0.0.1
-                        port_value: 10080
-                  load_balancing_weight: 1
-                load_balancing_weight: 1
-                locality:
-                  zone: $(ENVOY_SERVICE_ZONE)
+            eds_cluster_config:
+              eds_config:
+                ads: {}
+                resource_api_version: 'V3'
+              service_name: local_cluster
+            load_balancing_policy:
+              policies:
+              - typed_extension_config:
+                  name: 'envoy.load_balancing_policies.least_request'
+                  typed_config:
+                    '@type': 'type.googleapis.com/envoy.extensions.load_balancing_policies.least_request.v3.LeastRequest'
+                    locality_lb_config:
+                      zone_aware_lb_config:
+                        min_cluster_size: '1'
             name: local_cluster
-            type: STATIC
+            type: EDS
           - connect_timeout: 10s
             load_assignment:
               cluster_name: xds_cluster
@@ -160,12 +174,22 @@ envoyProxyForGatewayClass:
               "@type": type.googleapis.com/envoy.extensions.resource_monitors.downstream_connections.v3.DownstreamConnectionsConfig
               max_active_downstream_connections: 50000
     logging: {}
-  status: {}
+  status:
+    ancestors:
+    - ancestorRef:
+        group: gateway.networking.k8s.io
+        kind: GatewayClass
+        name: eg
+      conditions:
+      - lastTransitionTime: null
+        message: EnvoyProxy has been accepted.
+        reason: Accepted
+        status: "True"
+        type: Accepted
 gatewayClass:
   apiVersion: gateway.networking.k8s.io/v1
   kind: GatewayClass
   metadata:
-    creationTimestamp: null
     name: eg
   spec:
     controllerName: gateway.envoyproxy.io/gatewayclass-controller
@@ -185,7 +209,6 @@ gateways:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: Gateway
   metadata:
-    creationTimestamp: null
     name: eg
     namespace: default
   spec:
@@ -341,7 +364,6 @@ grpcRoutes:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: GRPCRoute
   metadata:
-    creationTimestamp: null
     name: backend
     namespace: default
   spec:
@@ -387,7 +409,6 @@ httpRoutes:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: HTTPRoute
   metadata:
-    creationTimestamp: null
     name: backend
     namespace: default
   spec:
@@ -428,10 +449,9 @@ httpRoutes:
         kind: Gateway
         name: eg
 tcpRoutes:
-- apiVersion: gateway.networking.k8s.io/v1alpha2
+- apiVersion: gateway.networking.k8s.io/v1
   kind: TCPRoute
   metadata:
-    creationTimestamp: null
     name: backend
     namespace: default
   spec:
@@ -467,13 +487,14 @@ tcpRoutes:
         name: eg
         sectionName: tcp
 tlsRoutes:
-- apiVersion: gateway.networking.k8s.io/v1alpha2
+- apiVersion: gateway.networking.k8s.io/v1alpha3
   kind: TLSRoute
   metadata:
-    creationTimestamp: null
     name: backend
     namespace: default
   spec:
+    hostnames:
+    - foo.com
     parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
@@ -506,10 +527,9 @@ tlsRoutes:
         name: eg
         sectionName: tls-passthrough
 udpRoutes:
-- apiVersion: gateway.networking.k8s.io/v1alpha2
+- apiVersion: gateway.networking.k8s.io/v1
   kind: UDPRoute
   metadata:
-    creationTimestamp: null
     name: backend
     namespace: default
   spec:
@@ -561,6 +581,8 @@ xds:
               portValue: 19000
         clusterManager:
           localClusterName: local_cluster
+        deferredStatOptions:
+          enableDeferredCreationStats: true
         dynamicResources:
           adsConfig:
             apiType: DELTA_GRPC
@@ -571,9 +593,11 @@ xds:
             transportApiVersion: V3
           cdsConfig:
             ads: {}
+            initialFetchTimeout: 0s
             resourceApiVersion: V3
           ldsConfig:
             ads: {}
+            initialFetchTimeout: 0s
             resourceApiVersion: V3
         layeredRuntime:
           layers:
@@ -607,21 +631,22 @@ xds:
             name: prometheus_stats
             type: STATIC
           - connectTimeout: 10s
-            loadAssignment:
-              clusterName: local_cluster
-              endpoints:
-              - lbEndpoints:
-                - endpoint:
-                    address:
-                      socketAddress:
-                        address: 127.0.0.1
-                        portValue: 10080
-                  loadBalancingWeight: 1
-                loadBalancingWeight: 1
-                locality:
-                  zone: $(ENVOY_SERVICE_ZONE)
+            edsClusterConfig:
+              edsConfig:
+                ads: {}
+                resourceApiVersion: V3
+              serviceName: local_cluster
+            loadBalancingPolicy:
+              policies:
+              - typedExtensionConfig:
+                  name: envoy.load_balancing_policies.least_request
+                  typedConfig:
+                    '@type': type.googleapis.com/envoy.extensions.load_balancing_policies.least_request.v3.LeastRequest
+                    localityLbConfig:
+                      zoneAwareLbConfig:
+                        minClusterSize: "1"
             name: local_cluster
-            type: STATIC
+            type: EDS
           - connectTimeout: 10s
             loadAssignment:
               clusterName: xds_cluster
@@ -696,6 +721,17 @@ xds:
                           cluster: prometheus_stats
                   statPrefix: eg-stats-http
             name: envoy-gateway-proxy-stats-0.0.0.0-19001
+        statsConfig:
+          statsTags:
+          - regex: \.zone(\.(([^\.]+)\.))
+            tagName: from_zone
+          - regex: \.zone\.[^\.]+\.(([^\.]+)\.)
+            tagName: to_zone
+          - regex: ^cluster(\..+\.(.+))\.total_match_count$
+            tagName: socket_match_name
+          - regex: circuit_breakers\.((.+?)\.).+
+            tagName: priority
+          useAllDefaultTags: true
     - '@type': type.googleapis.com/envoy.admin.v3.EndpointsConfigDump
       dynamicEndpointConfigs:
       - endpointConfig:
@@ -824,7 +860,6 @@ xds:
               resourceApiVersion: V3
             serviceName: httproute/default/backend/rule/0
           ignoreHealthOnHostRemoval: true
-          lbPolicy: LEAST_REQUEST
           loadBalancingPolicy:
             policies:
             - typedExtensionConfig:
@@ -858,7 +893,6 @@ xds:
               resourceApiVersion: V3
             serviceName: grpcroute/default/backend/rule/0
           ignoreHealthOnHostRemoval: true
-          lbPolicy: LEAST_REQUEST
           loadBalancingPolicy:
             policies:
             - typedExtensionConfig:
@@ -898,7 +932,6 @@ xds:
               resourceApiVersion: V3
             serviceName: tcproute/default/backend/rule/-1
           ignoreHealthOnHostRemoval: true
-          lbPolicy: LEAST_REQUEST
           loadBalancingPolicy:
             policies:
             - typedExtensionConfig:
@@ -931,7 +964,6 @@ xds:
               resourceApiVersion: V3
             serviceName: tlsroute/default/backend/rule/-1
           ignoreHealthOnHostRemoval: true
-          lbPolicy: LEAST_REQUEST
           loadBalancingPolicy:
             policies:
             - typedExtensionConfig:
@@ -964,7 +996,6 @@ xds:
               resourceApiVersion: V3
             serviceName: udproute/default/backend/rule/-1
           ignoreHealthOnHostRemoval: true
-          lbPolicy: LEAST_REQUEST
           loadBalancingPolicy:
             policies:
             - typedExtensionConfig:

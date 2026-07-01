@@ -8,6 +8,7 @@ package proxy
 import (
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/containers/image/v5/docker/reference"
 	corev1 "k8s.io/api/core/v1"
@@ -76,6 +77,7 @@ func enablePrometheus(infra *ir.ProxyInfra) bool {
 func expectedProxyContainers(infra *ir.ProxyInfra,
 	containerSpec *egv1a1.KubernetesContainerSpec,
 	shutdownConfig *egv1a1.ShutdownConfig, shutdownManager *egv1a1.ShutdownManager,
+	topologyInjectorDisabled bool,
 	controllerNamespace, dnsDomain string, gatewayNamespaceMode bool,
 ) ([]corev1.Container, error) {
 	ports := make([]corev1.ContainerPort, 0, 2)
@@ -99,16 +101,25 @@ func expectedProxyContainers(infra *ir.ProxyInfra,
 		proxyMetrics = infra.Config.Spec.Telemetry.Metrics
 	}
 
+	resolvedMetricSinks := common.ConvertResolvedMetricSinks(infra.ResolvedMetricSinks)
+
 	maxHeapSizeBytes := calculateMaxHeapSizeBytes(containerSpec.Resources)
+
 	// Get the default Bootstrap
 	bootstrapConfigOptions := &bootstrap.RenderBootstrapConfigOptions{
-		ProxyMetrics: proxyMetrics,
+		ProxyMetrics:        proxyMetrics,
+		ResolvedMetricSinks: resolvedMetricSinks,
 		SdsConfig: bootstrap.SdsConfigPath{
 			Certificate: filepath.Join("/sds", common.SdsCertFilename),
 			TrustedCA:   filepath.Join("/sds", common.SdsCAFilename),
 		},
-		MaxHeapSizeBytes: maxHeapSizeBytes,
-		XdsServerHost:    ptr.To(fmt.Sprintf("%s.%s.svc.%s", config.EnvoyGatewayServiceName, controllerNamespace, dnsDomain)),
+		MaxHeapSizeBytes:         maxHeapSizeBytes,
+		XdsServerHost:            new(fmt.Sprintf("%s.%s.svc.%s.", config.EnvoyGatewayServiceName, controllerNamespace, dnsDomain)),
+		TopologyInjectorDisabled: topologyInjectorDisabled,
+	}
+
+	if gatewayNamespaceMode {
+		bootstrapConfigOptions.SdsConfig.ServiceAccountToken = filepath.Join("/sds", common.SdsServiceAccountTokenFilename)
 	}
 
 	args, err := common.BuildProxyArgs(infra, shutdownConfig, bootstrapConfigOptions, fmt.Sprintf("$(%s)", envoyPodEnvVar), gatewayNamespaceMode)
@@ -257,7 +268,11 @@ func expectedShutdownManagerImage(shutdownManager *egv1a1.ShutdownManager) strin
 func expectedShutdownManagerArgs(cfg *egv1a1.ShutdownConfig) []string {
 	args := []string{"envoy", "shutdown-manager"}
 	if cfg != nil && cfg.DrainTimeout != nil {
-		args = append(args, fmt.Sprintf("--ready-timeout=%.0fs", cfg.DrainTimeout.Seconds()+10))
+		d, err := time.ParseDuration(string(*cfg.DrainTimeout))
+		if err != nil {
+			return nil
+		}
+		args = append(args, fmt.Sprintf("--ready-timeout=%.0fs", d.Seconds()+10))
 	}
 	return args
 }
@@ -270,11 +285,19 @@ func expectedShutdownPreStopCommand(cfg *egv1a1.ShutdownConfig) []string {
 	}
 
 	if cfg.DrainTimeout != nil {
-		command = append(command, fmt.Sprintf("--drain-timeout=%.0fs", cfg.DrainTimeout.Seconds()))
+		d, err := time.ParseDuration(string(*cfg.DrainTimeout))
+		if err != nil {
+			return nil
+		}
+		command = append(command, fmt.Sprintf("--drain-timeout=%.0fs", d.Seconds()))
 	}
 
 	if cfg.MinDrainDuration != nil {
-		command = append(command, fmt.Sprintf("--min-drain-duration=%.0fs", cfg.MinDrainDuration.Seconds()))
+		d, err := time.ParseDuration(string(*cfg.MinDrainDuration))
+		if err != nil {
+			return nil
+		}
+		command = append(command, fmt.Sprintf("--min-drain-duration=%.0fs", d.Seconds()))
 	}
 
 	return command
@@ -312,7 +335,7 @@ func (r *ResourceRender) expectedVolumes(pod *egv1a1.KubernetesPodSpec) []corev1
 		VolumeSource: corev1.VolumeSource{
 			Secret: &corev1.SecretVolumeSource{
 				SecretName:  "envoy",
-				DefaultMode: ptr.To[int32](420),
+				DefaultMode: new(int32(420)),
 			},
 		},
 	}
@@ -331,8 +354,8 @@ func (r *ResourceRender) expectedVolumes(pod *egv1a1.KubernetesPodSpec) []corev1
 							Path: XdsTLSCaFileName,
 						},
 					},
-					DefaultMode: ptr.To[int32](420),
-					Optional:    ptr.To(false),
+					DefaultMode: new(int32(420)),
+					Optional:    new(false),
 				},
 			},
 		}
@@ -346,11 +369,11 @@ func (r *ResourceRender) expectedVolumes(pod *egv1a1.KubernetesPodSpec) []corev1
 							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
 								Path:              "sa-token",
 								Audience:          saAudience,
-								ExpirationSeconds: ptr.To[int64](3600),
+								ExpirationSeconds: new(int64(3600)),
 							},
 						},
 					},
-					DefaultMode: ptr.To[int32](420),
+					DefaultMode: new(int32(420)),
 				},
 			},
 		}
@@ -367,8 +390,8 @@ func (r *ResourceRender) expectedVolumes(pod *egv1a1.KubernetesPodSpec) []corev1
 					Name: r.Name(),
 				},
 				Items:       sdsConfigMapItems(r.GatewayNamespaceMode),
-				DefaultMode: ptr.To[int32](420),
-				Optional:    ptr.To(false),
+				DefaultMode: new(int32(420)),
+				Optional:    new(false),
 			},
 		},
 	}
@@ -383,6 +406,10 @@ func sdsConfigMapItems(gatewayNamespaceMode bool) []corev1.KeyToPath {
 			{
 				Key:  common.SdsCAFilename,
 				Path: common.SdsCAFilename,
+			},
+			{
+				Key:  common.SdsServiceAccountTokenFilename,
+				Path: common.SdsServiceAccountTokenFilename,
 			},
 		}
 	}
@@ -461,8 +488,8 @@ func expectedEnvoySecurityContext(containerSpec *egv1a1.KubernetesContainerSpec)
 	sc := resource.DefaultSecurityContext()
 
 	// run as non-root user
-	sc.RunAsGroup = ptr.To(int64(65532))
-	sc.RunAsUser = ptr.To(int64(65532))
+	sc.RunAsGroup = new(int64(65532))
+	sc.RunAsUser = new(int64(65532))
 
 	// Envoy container needs to write to the log file/UDS socket.
 	sc.ReadOnlyRootFilesystem = nil
@@ -477,8 +504,8 @@ func expectedShutdownManagerSecurityContext(containerSpec *egv1a1.KubernetesCont
 	sc := resource.DefaultSecurityContext()
 
 	// run as non-root user
-	sc.RunAsGroup = ptr.To(int64(65532))
-	sc.RunAsUser = ptr.To(int64(65532))
+	sc.RunAsGroup = new(int64(65532))
+	sc.RunAsUser = new(int64(65532))
 
 	// ShutdownManger creates a file to indicate the connection drain process is completed,
 	// so it needs file write permission.

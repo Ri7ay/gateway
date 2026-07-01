@@ -14,7 +14,6 @@ import (
 	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
 	"google.golang.org/protobuf/types/known/anypb"
-	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/gateway/internal/ir"
 	"github.com/envoyproxy/gateway/internal/xds/types"
@@ -70,7 +69,7 @@ func containsGlobalRateLimit(httpListeners []*ir.HTTPListener) bool {
 func createEnvoyClientTLSCertSecret(tCtx *types.ResourceVersionTable, globalResources *ir.GlobalResources) error {
 	if err := tCtx.AddXdsResource(
 		resourcev3.SecretType,
-		buildXdsTLSCertSecret(*globalResources.EnvoyClientCertificate)); err != nil {
+		buildXdsTLSCertSecret(globalResources.EnvoyClientCertificate)); err != nil {
 		return err
 	}
 	return nil
@@ -81,10 +80,12 @@ func (t *Translator) createRateLimitServiceCluster(tCtx *types.ResourceVersionTa
 	// Create cluster if it does not exist
 	host, port := t.getRateLimitServiceGrpcHostPort()
 	ds := &ir.DestinationSetting{
-		Weight:    ptr.To[uint32](1),
+		Weight:    new(uint32(1)),
 		Protocol:  ir.GRPC,
-		Endpoints: []*ir.DestinationEndpoint{ir.NewDestEndpoint(host, port, false, nil)},
+		Endpoints: []*ir.DestinationEndpoint{ir.NewDestEndpoint(nil, host, port, false, nil)},
 		Name:      destinationSettingName(clusterName),
+		// TODO: tracked with issue #6861
+		Metadata: nil,
 	}
 
 	tSocket, err := buildEnvoyClientTLSSocket(envoyClientCertificate)
@@ -98,6 +99,7 @@ func (t *Translator) createRateLimitServiceCluster(tCtx *types.ResourceVersionTa
 		tSocket:      tSocket,
 		endpointType: EndpointTypeDNS,
 		metrics:      metrics,
+		metadata:     ds.Metadata,
 	})
 }
 
@@ -151,10 +153,12 @@ func containsWasm(httpListeners []*ir.HTTPListener) bool {
 
 func (t *Translator) createWasmHTTPServiceCluster(tCtx *types.ResourceVersionTable, envoyClientCertificate *ir.TLSCertificate, metrics *ir.Metrics) error {
 	ds := &ir.DestinationSetting{
-		Weight:    ptr.To[uint32](1),
+		Weight:    new(uint32(1)),
 		Protocol:  ir.GRPC,
-		Endpoints: []*ir.DestinationEndpoint{ir.NewDestEndpoint(wasmHTTPServiceFQDN(t.ControllerNamespace), wasmHTTPServicePort, false, nil)},
+		Endpoints: []*ir.DestinationEndpoint{ir.NewDestEndpoint(nil, wasmHTTPServiceFQDN(t.ControllerNamespace), wasmHTTPServicePort, false, nil)},
 		Name:      destinationSettingName(wasmHTTPServiceClusterName),
+		// TODO: tracked with issue #6861
+		Metadata: nil,
 	}
 
 	tSocket, err := buildEnvoyClientTLSSocket(envoyClientCertificate)
@@ -168,6 +172,7 @@ func (t *Translator) createWasmHTTPServiceCluster(tCtx *types.ResourceVersionTab
 		tSocket:      tSocket,
 		endpointType: EndpointTypeDNS,
 		metrics:      metrics,
+		metadata:     ds.Metadata,
 	})
 }
 

@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"golang.org/x/exp/maps"
 	appsv1 "k8s.io/api/apps/v1"
@@ -26,6 +27,7 @@ import (
 	"github.com/envoyproxy/gateway/internal/gatewayapi"
 	gwapiresource "github.com/envoyproxy/gateway/internal/gatewayapi/resource"
 	"github.com/envoyproxy/gateway/internal/infrastructure/common"
+	infracommon "github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/common"
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/resource"
 	"github.com/envoyproxy/gateway/internal/ir"
 	"github.com/envoyproxy/gateway/internal/utils"
@@ -33,6 +35,10 @@ import (
 )
 
 const (
+	// XdsServiceAccountTokenFilepath is the fully qualified path of the file containing
+	// the service account token used for authentication in GatewayNamespaceMode.
+	// #nosec G101 - This is a file path, not a credential
+	XdsServiceAccountTokenFilepath = "/var/run/secrets/token/sa-token"
 	// XdsTLSCertFilepath is the fully qualified path of the file containing Envoy's
 	// xDS server TLS certificate.
 	XdsTLSCertFilepath = "/certs/tls.crt"
@@ -61,6 +67,8 @@ type ResourceRender struct {
 
 	ShutdownManager *egv1a1.ShutdownManager
 
+	TopologyInjectorDisabled bool
+
 	GatewayNamespaceMode bool
 
 	// ownerReferenceUID store the uid of its owner reference. Key is the kind of owner resource.
@@ -85,13 +93,14 @@ func NewResourceRender(ctx context.Context, kubeInfra KubernetesInfraProvider, i
 	}
 
 	return &ResourceRender{
-		envoyNamespace:       kubeInfra.GetResourceNamespace(infra),
-		controllerNamespace:  kubeInfra.GetControllerNamespace(),
-		DNSDomain:            kubeInfra.GetDNSDomain(),
-		infra:                infra.GetProxyInfra(),
-		ShutdownManager:      kubeInfra.GetEnvoyGateway().GetEnvoyGatewayProvider().GetEnvoyGatewayKubeProvider().ShutdownManager,
-		GatewayNamespaceMode: kubeInfra.GetEnvoyGateway().GatewayNamespaceMode(),
-		ownerReferenceUID:    ownerReference,
+		envoyNamespace:           kubeInfra.GetResourceNamespace(infra),
+		controllerNamespace:      kubeInfra.GetControllerNamespace(),
+		DNSDomain:                kubeInfra.GetDNSDomain(),
+		infra:                    infra.GetProxyInfra(),
+		ShutdownManager:          kubeInfra.GetEnvoyGateway().GetEnvoyGatewayProvider().GetEnvoyGatewayKubeProvider().ShutdownManager,
+		TopologyInjectorDisabled: kubeInfra.GetEnvoyGateway().TopologyInjectorDisabled(),
+		GatewayNamespaceMode:     kubeInfra.GetEnvoyGateway().GatewayNamespaceMode(),
+		ownerReferenceUID:        ownerReference,
 	}, nil
 }
 
@@ -126,7 +135,7 @@ func (r *ResourceRender) LabelSelector() labels.Selector {
 	return labels.SelectorFromSet(r.stableSelector().MatchLabels)
 }
 
-func (r *ResourceRender) OwnerReferences() []metav1.OwnerReference {
+func (r *ResourceRender) ownerReferences() []metav1.OwnerReference {
 	var ownerReferences []metav1.OwnerReference
 	if r.ownerReferenceUID != nil {
 		key := gwapiresource.KindGatewayClass
@@ -158,13 +167,13 @@ func (r *ResourceRender) ServiceAccount() (*corev1.ServiceAccount, error) {
 			Kind:       "ServiceAccount",
 			APIVersion: "v1",
 		},
-		AutomountServiceAccountToken: ptr.To(false),
+		AutomountServiceAccountToken: new(false),
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       r.Namespace(),
 			Name:            r.serviceAccountName(),
 			Labels:          saLabels,
 			Annotations:     r.infra.GetProxyMetadata().Annotations,
-			OwnerReferences: r.OwnerReferences(),
+			OwnerReferences: r.ownerReferences(),
 		},
 	}, nil
 }
@@ -266,10 +275,10 @@ func (r *ResourceRender) Service() (*corev1.Service, error) {
 		switch *ipFamily {
 		case egv1a1.IPv6:
 			serviceSpec.IPFamilies = []corev1.IPFamily{corev1.IPv6Protocol}
-			serviceSpec.IPFamilyPolicy = ptr.To(corev1.IPFamilyPolicySingleStack)
+			serviceSpec.IPFamilyPolicy = new(corev1.IPFamilyPolicySingleStack)
 		case egv1a1.DualStack:
 			serviceSpec.IPFamilies = []corev1.IPFamily{corev1.IPv4Protocol, corev1.IPv6Protocol}
-			serviceSpec.IPFamilyPolicy = ptr.To(corev1.IPFamilyPolicyRequireDualStack)
+			serviceSpec.IPFamilyPolicy = new(corev1.IPFamilyPolicyRequireDualStack)
 		}
 	}
 
@@ -282,7 +291,7 @@ func (r *ResourceRender) Service() (*corev1.Service, error) {
 			Namespace:       r.Namespace(),
 			Labels:          svcLabels,
 			Annotations:     annotations,
-			OwnerReferences: r.OwnerReferences(),
+			OwnerReferences: r.ownerReferences(),
 		},
 		Spec: serviceSpec,
 	}
@@ -315,6 +324,11 @@ func (r *ResourceRender) ConfigMap(cert string) (*corev1.ConfigMap, error) {
 		common.SdsCAFilename:   common.GetSdsCAConfigMapData(XdsTLSCaFilepath),
 		common.SdsCertFilename: common.GetSdsCertConfigMapData(XdsTLSCertFilepath, XdsTLSKeyFilepath),
 	}
+
+	if r.GatewayNamespaceMode {
+		data[common.SdsServiceAccountTokenFilename] = common.GetSdsServiceAccountTokenConfigMapData(XdsServiceAccountTokenFilepath)
+	}
+
 	if cert != "" {
 		data[XdsTLSCaFileName] = cert
 	}
@@ -329,7 +343,7 @@ func (r *ResourceRender) ConfigMap(cert string) (*corev1.ConfigMap, error) {
 			Name:            r.Name(),
 			Labels:          cmLabels,
 			Annotations:     r.infra.GetProxyMetadata().Annotations,
-			OwnerReferences: r.OwnerReferences(),
+			OwnerReferences: r.ownerReferences(),
 		},
 		Data: data,
 	}, nil
@@ -354,7 +368,7 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 
 	// Get the EnvoyProxy config to configure the deployment.
 	provider := proxyConfig.GetEnvoyProxyProvider()
-	if provider.Type != egv1a1.ProviderTypeKubernetes {
+	if provider.Type != egv1a1.EnvoyProxyProviderTypeKubernetes {
 		return nil, fmt.Errorf("invalid provider type %v for Kubernetes infra manager", provider.Type)
 	}
 	deploymentConfig := provider.GetEnvoyProxyKubeProvider().EnvoyDeployment
@@ -365,7 +379,7 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 	}
 
 	// Get expected bootstrap configurations rendered ProxyContainers
-	containers, err := expectedProxyContainers(r.infra, deploymentConfig.Container, proxyConfig.Spec.Shutdown, r.ShutdownManager, r.ControllerNamespace(), r.DNSDomain, r.GatewayNamespaceMode)
+	containers, err := expectedProxyContainers(r.infra, deploymentConfig.Container, proxyConfig.Spec.Shutdown, r.ShutdownManager, r.TopologyInjectorDisabled, r.ControllerNamespace(), r.DNSDomain, r.GatewayNamespaceMode)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +402,7 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 			Namespace:       r.Namespace(),
 			Labels:          dpLabels,
 			Annotations:     dpAnnotations,
-			OwnerReferences: r.OwnerReferences(),
+			OwnerReferences: r.ownerReferences(),
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: deploymentConfig.Replicas,
@@ -401,7 +415,7 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					AutomountServiceAccountToken:  ptr.To(false),
+					AutomountServiceAccountToken:  new(false),
 					Containers:                    containers,
 					InitContainers:                deploymentConfig.InitContainers,
 					ServiceAccountName:            r.serviceAccountName(),
@@ -416,10 +430,11 @@ func (r *ResourceRender) Deployment() (*appsv1.Deployment, error) {
 					ImagePullSecrets:              deploymentConfig.Pod.ImagePullSecrets,
 					NodeSelector:                  deploymentConfig.Pod.NodeSelector,
 					TopologySpreadConstraints:     deploymentConfig.Pod.TopologySpreadConstraints,
+					PriorityClassName:             ptr.Deref(deploymentConfig.Pod.PriorityClassName, ""),
 				},
 			},
-			RevisionHistoryLimit:    ptr.To[int32](10),
-			ProgressDeadlineSeconds: ptr.To[int32](600),
+			RevisionHistoryLimit:    new(int32(10)),
+			ProgressDeadlineSeconds: new(int32(600)),
 		},
 	}
 
@@ -443,7 +458,7 @@ func (r *ResourceRender) DaemonSet() (*appsv1.DaemonSet, error) {
 
 	// Get the EnvoyProxy config to configure the daemonset.
 	provider := proxyConfig.GetEnvoyProxyProvider()
-	if provider.Type != egv1a1.ProviderTypeKubernetes {
+	if provider.Type != egv1a1.EnvoyProxyProviderTypeKubernetes {
 		return nil, fmt.Errorf("invalid provider type %v for Kubernetes infra manager", provider.Type)
 	}
 
@@ -455,7 +470,7 @@ func (r *ResourceRender) DaemonSet() (*appsv1.DaemonSet, error) {
 	}
 
 	// Get expected bootstrap configurations rendered ProxyContainers
-	containers, err := expectedProxyContainers(r.infra, daemonSetConfig.Container, proxyConfig.Spec.Shutdown, r.ShutdownManager, r.ControllerNamespace(), r.DNSDomain, r.GatewayNamespaceMode)
+	containers, err := expectedProxyContainers(r.infra, daemonSetConfig.Container, proxyConfig.Spec.Shutdown, r.ShutdownManager, r.TopologyInjectorDisabled, r.ControllerNamespace(), r.DNSDomain, r.GatewayNamespaceMode)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +493,7 @@ func (r *ResourceRender) DaemonSet() (*appsv1.DaemonSet, error) {
 			Namespace:       r.Namespace(),
 			Labels:          dsLabels,
 			Annotations:     dsAnnotations,
-			OwnerReferences: r.OwnerReferences(),
+			OwnerReferences: r.ownerReferences(),
 		},
 		Spec: appsv1.DaemonSetSpec{
 			// Daemonset's selector is immutable.
@@ -511,7 +526,7 @@ func (r *ResourceRender) DaemonSet() (*appsv1.DaemonSet, error) {
 
 func (r *ResourceRender) pdbConfig() (*egv1a1.KubernetesPodDisruptionBudgetSpec, error) {
 	provider := r.infra.GetProxyConfig().GetEnvoyProxyProvider()
-	if provider.Type != egv1a1.ProviderTypeKubernetes {
+	if provider.Type != egv1a1.EnvoyProxyProviderTypeKubernetes {
 		return nil, fmt.Errorf("invalid provider type %v for Kubernetes infra manager", provider.Type)
 	}
 
@@ -530,50 +545,18 @@ func (r *ResourceRender) PodDisruptionBudget() (*policyv1.PodDisruptionBudget, e
 		return nil, err
 	}
 
-	pdbSpec := policyv1.PodDisruptionBudgetSpec{
-		Selector: r.stableSelector(),
-	}
-	switch {
-	case pdb.MinAvailable != nil:
-		pdbSpec.MinAvailable = pdb.MinAvailable
-	case pdb.MaxUnavailable != nil:
-		pdbSpec.MaxUnavailable = pdb.MaxUnavailable
-	default:
-		pdbSpec.MinAvailable = &intstr.IntOrString{Type: intstr.Int, IntVal: 0}
-	}
-
-	podDisruptionBudget := &policyv1.PodDisruptionBudget{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:       r.Namespace(),
-			OwnerReferences: r.OwnerReferences(),
-			Annotations:     r.infra.GetProxyMetadata().Annotations,
-			Labels:          r.stableSelector().MatchLabels,
-		},
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "policy/v1",
-			Kind:       "PodDisruptionBudget",
-		},
-		Spec: pdbSpec,
-	}
-
 	// set name
+	resourceName := r.Name()
 	if pdb.Name != nil {
-		podDisruptionBudget.Name = *pdb.Name
-	} else {
-		podDisruptionBudget.Name = r.Name()
+		resourceName = *pdb.Name
 	}
 
-	// apply merge patch to PodDisruptionBudget
-	if podDisruptionBudget, err = pdb.ApplyMergePatch(podDisruptionBudget); err != nil {
-		return nil, err
-	}
-
-	return podDisruptionBudget, nil
+	return infracommon.GetPodDisruptionBudget(pdb, r.stableSelector(), &types.NamespacedName{Name: resourceName, Namespace: r.Namespace()}, r.ownerReferences())
 }
 
 func (r *ResourceRender) HorizontalPodAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	provider := r.infra.GetProxyConfig().GetEnvoyProxyProvider()
-	if provider.Type != egv1a1.ProviderTypeKubernetes {
+	if provider.Type != egv1a1.EnvoyProxyProviderTypeKubernetes {
 		return nil, fmt.Errorf("invalid provider type %v for Kubernetes infra manager", provider.Type)
 	}
 
@@ -591,7 +574,7 @@ func (r *ResourceRender) HorizontalPodAutoscaler() (*autoscalingv2.HorizontalPod
 			Namespace:       r.Namespace(),
 			Annotations:     r.infra.GetProxyMetadata().Annotations,
 			Labels:          r.stableSelector().MatchLabels,
-			OwnerReferences: r.OwnerReferences(),
+			OwnerReferences: r.ownerReferences(),
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
@@ -631,9 +614,13 @@ func (r *ResourceRender) HorizontalPodAutoscaler() (*autoscalingv2.HorizontalPod
 func expectedTerminationGracePeriodSeconds(cfg *egv1a1.ShutdownConfig) *int64 {
 	s := 360 // default
 	if cfg != nil && cfg.DrainTimeout != nil {
-		s = int(cfg.DrainTimeout.Seconds() + 300) // 5 minutes longer than drain timeout
+		d, err := time.ParseDuration(string(*cfg.DrainTimeout))
+		if err != nil {
+			return nil
+		}
+		s = int(d.Seconds() + 300) // 5 minutes longer than drain timeout
 	}
-	return ptr.To(int64(s))
+	return new(int64(s))
 }
 
 func (r *ResourceRender) getPodSpec(
@@ -642,10 +629,10 @@ func (r *ResourceRender) getPodSpec(
 	proxyConfig *egv1a1.EnvoyProxy,
 ) corev1.PodSpec {
 	return corev1.PodSpec{
-		AutomountServiceAccountToken:  ptr.To(false),
+		AutomountServiceAccountToken:  new(false),
 		Containers:                    containers,
 		InitContainers:                initContainers,
-		ServiceAccountName:            r.Name(),
+		ServiceAccountName:            r.serviceAccountName(),
 		TerminationGracePeriodSeconds: expectedTerminationGracePeriodSeconds(proxyConfig.Spec.Shutdown),
 		DNSPolicy:                     corev1.DNSClusterFirst,
 		RestartPolicy:                 corev1.RestartPolicyAlways,
@@ -657,6 +644,7 @@ func (r *ResourceRender) getPodSpec(
 		ImagePullSecrets:              pod.ImagePullSecrets,
 		NodeSelector:                  pod.NodeSelector,
 		TopologySpreadConstraints:     pod.TopologySpreadConstraints,
+		PriorityClassName:             ptr.Deref(pod.PriorityClassName, ""),
 	}
 }
 

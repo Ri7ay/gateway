@@ -26,13 +26,16 @@ import (
 	"sigs.k8s.io/gateway-api/conformance/utils/kubernetes"
 	"sigs.k8s.io/gateway-api/conformance/utils/suite"
 	"sigs.k8s.io/gateway-api/conformance/utils/tlog"
+
+	"github.com/envoyproxy/gateway/internal/gatewayapi"
+	"github.com/envoyproxy/gateway/internal/gatewayapi/resource"
 )
 
 func init() {
-	ConformanceTests = append(ConformanceTests, EnvoyProxyCustomNameTest)
+	ConformanceTests = append(ConformanceTests, EnvoyProxyCustomName)
 }
 
-var EnvoyProxyCustomNameTest = suite.ConformanceTest{
+var EnvoyProxyCustomName = suite.ConformanceTest{
 	ShortName:   "EnvoyProxyCustomName",
 	Description: "Test running Envoy with custom name",
 	Manifests:   []string{"testdata/envoyproxy-custom-name.yaml"},
@@ -48,7 +51,7 @@ var EnvoyProxyCustomNameTest = suite.ConformanceTest{
 					Path: "/deploy",
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -59,7 +62,7 @@ var EnvoyProxyCustomNameTest = suite.ConformanceTest{
 				t.Fatalf("Failed to check EnvoyProxy deployment: %v", err)
 			}
 			// Send a request to a valid path and expect a successful response
-			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, okResp)
+			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, &okResp)
 
 			// Update the Gateway to use a custom name
 			updateGateway(t, suite, gwNN, &gwapiv1.GatewayInfrastructure{
@@ -70,12 +73,22 @@ var EnvoyProxyCustomNameTest = suite.ConformanceTest{
 				},
 			})
 
+			EnvoyProxyMustBeAccepted(t, suite.Client, types.NamespacedName{
+				Name:      "deploy-custom-name",
+				Namespace: ns,
+			}, gwapiv1.ParentReference{
+				Group:     gatewayapi.GroupPtr(gwapiv1.GroupName),
+				Kind:      gatewayapi.KindPtr(resource.KindGateway),
+				Namespace: gatewayapi.NamespacePtr(gwNN.Namespace),
+				Name:      gwapiv1.ObjectName(gwNN.Name),
+			})
+
 			err = checkDeployment(t, suite, gwNN, gatewayNS, "custom-", 1, 1)
 			if err != nil {
 				t.Fatalf("Failed to delete Gateway: %v", err)
 			}
 			// Send a request to a valid path and expect a successful response
-			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, okResp)
+			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, &okResp)
 
 			// Rollback the Gateway to without custom name
 			updateGateway(t, suite, gwNN, &gwapiv1.GatewayInfrastructure{})
@@ -86,7 +99,7 @@ var EnvoyProxyCustomNameTest = suite.ConformanceTest{
 				t.Fatalf("Failed to check EnvoyProxy deployment: %v", err)
 			}
 			// Send a request to a valid path and expect a successful response
-			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, okResp)
+			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, &okResp)
 		})
 
 		t.Run("DaemonSet", func(t *testing.T) {
@@ -98,7 +111,7 @@ var EnvoyProxyCustomNameTest = suite.ConformanceTest{
 					Path: "/daemonset",
 				},
 				Response: http.Response{
-					StatusCode: 200,
+					StatusCodes: []int{200},
 				},
 				Namespace: ns,
 			}
@@ -110,7 +123,7 @@ var EnvoyProxyCustomNameTest = suite.ConformanceTest{
 			}
 
 			// Send a request to a valid path and expect a successful response
-			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, okResp)
+			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, &okResp)
 
 			// Update the Gateway to use a custom name
 			updateGateway(t, suite, gwNN, &gwapiv1.GatewayInfrastructure{
@@ -126,7 +139,7 @@ var EnvoyProxyCustomNameTest = suite.ConformanceTest{
 				t.Fatalf("Failed to delete Gateway: %v", err)
 			}
 			// Send a request to a valid path and expect a successful response
-			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, okResp)
+			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, &okResp)
 
 			// Rollback the Gateway to without custom name
 			updateGateway(t, suite, gwNN, &gwapiv1.GatewayInfrastructure{
@@ -144,7 +157,7 @@ var EnvoyProxyCustomNameTest = suite.ConformanceTest{
 			}
 
 			// Send a request to a valid path and expect a successful response
-			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, okResp)
+			ExpectEventuallyConsistentResponse(t, suite, gwNN, routeNN, &okResp)
 		})
 	},
 }
@@ -159,7 +172,7 @@ func expectedGatewayName(gwNN types.NamespacedName) string {
 
 func updateGateway(t *testing.T, suite *suite.ConformanceTestSuite, gwNN types.NamespacedName, paramRef *gwapiv1.GatewayInfrastructure) {
 	err := wait.PollUntilContextTimeout(t.Context(), time.Second, suite.TimeoutConfig.CreateTimeout, true,
-		func(ctx context.Context) (bool, error) {
+		func(_ context.Context) (bool, error) {
 			gw := &gwapiv1.Gateway{}
 			err := suite.Client.Get(context.Background(), gwNN, gw)
 			if err != nil {
@@ -182,13 +195,17 @@ func updateGateway(t *testing.T, suite *suite.ConformanceTestSuite, gwNN types.N
 // ExpectEventuallyConsistentResponse sends a request to the gateway and waits for an eventually consistent response.
 // This's different from because of the name may change, so we query the gateway address every time.
 func ExpectEventuallyConsistentResponse(t *testing.T, suite *suite.ConformanceTestSuite,
-	gwNN, routeNN types.NamespacedName, expected http.ExpectedResponse,
+	gwNN, routeNN types.NamespacedName, expected *http.ExpectedResponse,
 ) {
 	t.Helper()
 
-	err := wait.PollUntilContextTimeout(t.Context(), time.Second, suite.TimeoutConfig.CreateTimeout, true, func(ctx context.Context) (bool, error) {
-		gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
-		req := http.MakeRequest(t, &expected, gwAddr, "HTTP", "http")
+	if expected == nil {
+		t.Fatalf("expected response cannot be nil")
+	}
+
+	err := wait.PollUntilContextTimeout(t.Context(), time.Second, suite.TimeoutConfig.CreateTimeout, true, func(_ context.Context) (bool, error) {
+		gwAddr := kubernetes.GatewayAndRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), &gwapiv1.HTTPRoute{}, false, routeNN)
+		req := http.MakeRequest(t, expected, gwAddr, "HTTP", "http")
 
 		cReq, cRes, err := suite.RoundTripper.CaptureRoundTrip(req)
 		if err != nil {
@@ -196,7 +213,7 @@ func ExpectEventuallyConsistentResponse(t *testing.T, suite *suite.ConformanceTe
 			return false, nil
 		}
 
-		if err := http.CompareRequest(t, &req, cReq, cRes, expected); err != nil {
+		if err := http.CompareRoundTrip(t, &req, cReq, cRes, *expected); err != nil {
 			tlog.Logf(t, "Response expectation failed for request: %+v  %v", req, err)
 			return false, nil
 		}
@@ -256,7 +273,7 @@ func checkDeployment(t *testing.T, suite *suite.ConformanceTestSuite, gwNN types
 }
 
 func checkObject(t *testing.T, suite *suite.ConformanceTestSuite, gvk schema.GroupVersionKind, gwNN types.NamespacedName, exceptCount int, exceptNs, exceptName string) error {
-	return wait.PollUntilContextTimeout(t.Context(), time.Second, suite.TimeoutConfig.CreateTimeout, true, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextTimeout(t.Context(), time.Second, suite.TimeoutConfig.CreateTimeout, true, func(_ context.Context) (bool, error) {
 		objList := &unstructured.UnstructuredList{}
 		objList.SetGroupVersionKind(gvk)
 

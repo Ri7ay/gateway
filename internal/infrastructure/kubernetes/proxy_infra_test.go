@@ -21,7 +21,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -34,6 +33,7 @@ import (
 	"github.com/envoyproxy/gateway/internal/gatewayapi/resource"
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/proxy"
 	"github.com/envoyproxy/gateway/internal/ir"
+	"github.com/envoyproxy/gateway/internal/message"
 )
 
 const (
@@ -90,7 +90,7 @@ func TestCmpBytes(t *testing.T) {
 }
 
 func newTestInfraWithClient(t *testing.T, cli client.Client) *Infra {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	cfg.EnvoyGateway = &egv1a1.EnvoyGateway{
@@ -112,7 +112,8 @@ func newTestInfraWithClient(t *testing.T, cli client.Client) *Infra {
 		},
 	}
 
-	return NewInfra(cli, cfg)
+	errorNotifier := message.RunnerErrorNotifier{RunnerName: t.Name(), RunnerErrors: &message.RunnerErrors{}}
+	return NewInfra(cli, cfg, errorNotifier)
 }
 
 func TestCreateProxyInfra(t *testing.T) {
@@ -136,7 +137,7 @@ func TestCreateProxyInfra(t *testing.T) {
 	ep := &egv1a1.EnvoyProxy{
 		Spec: egv1a1.EnvoyProxySpec{
 			Provider: &egv1a1.EnvoyProxyProvider{
-				Type:       egv1a1.ProviderTypeKubernetes,
+				Type:       egv1a1.EnvoyProxyProviderTypeKubernetes,
 				Kubernetes: egv1a1.DefaultEnvoyProxyKubeProvider(),
 			},
 		},
@@ -144,13 +145,13 @@ func TestCreateProxyInfra(t *testing.T) {
 	infraWithPDB := infraWithLabels.DeepCopy()
 	infraWithPDB.GetProxyInfra().Config = ep.DeepCopy()
 	infraWithPDB.GetProxyInfra().Config.Spec.Provider.Kubernetes.EnvoyPDB = &egv1a1.KubernetesPodDisruptionBudgetSpec{
-		MinAvailable: ptr.To(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
+		MinAvailable: new(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
 	}
 
 	infraWithHPA := infraWithLabels.DeepCopy()
 	infraWithHPA.GetProxyInfra().Config = ep.DeepCopy()
 	infraWithHPA.GetProxyInfra().Config.Spec.Provider.Kubernetes.EnvoyHpa = &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-		MinReplicas: ptr.To[int32](1),
+		MinReplicas: new(int32(1)),
 	}
 
 	testCases := []struct {

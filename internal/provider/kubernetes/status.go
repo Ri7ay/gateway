@@ -8,31 +8,28 @@ package kubernetes
 import (
 	"context"
 	"fmt"
-	"reflect"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gwapiv1a2 "sigs.k8s.io/gateway-api/apis/v1alpha2"
-	gwapiv1a3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
-	"github.com/envoyproxy/gateway/internal/gatewayapi/resource"
+	"github.com/envoyproxy/gateway/internal/gatewayapi"
 	"github.com/envoyproxy/gateway/internal/gatewayapi/status"
 	"github.com/envoyproxy/gateway/internal/message"
 	"github.com/envoyproxy/gateway/internal/utils"
 )
 
-// subscribeAndUpdateStatus subscribes to gateway API object status updates and
-// writes it into the Kubernetes API Server.
-func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, extensionManagerEnabled bool) {
+// updateStatusFromSubscriptions writes gateway API object status updates to the Kubernetes API server.
+func (r *gatewayAPIReconciler) updateStatusFromSubscriptions(ctx context.Context, extensionManagerEnabled bool) {
 	// GatewayClass object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.GatewayClassStatusMessageName},
-			r.resources.GatewayClassStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1.GatewayClassStatus], errChan chan error) {
+			r.subscriptions.gatewayClassStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.GatewayClassStatus], _ chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -46,8 +43,14 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 						if !ok {
 							panic(fmt.Sprintf("unsupported object type %T", obj))
 						}
-						gcCopy := gc.DeepCopy()
-						gcCopy.Status = *update.Value
+						valCopy := update.Value.DeepCopy()
+						setLastTransitionTimeInConditions(valCopy.Conditions, metav1.Now())
+						gcCopy := &gwapiv1.GatewayClass{
+							TypeMeta:   gc.TypeMeta,
+							ObjectMeta: gc.ObjectMeta,
+							Spec:       gc.Spec,
+							Status:     *valCopy,
+						}
 						return gcCopy
 					}),
 				})
@@ -58,9 +61,9 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// Gateway object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.GatewayStatusMessageName},
-			r.resources.GatewayStatuses.Subscribe(ctx),
+			r.subscriptions.gatewayStatuses,
 			func(update message.Update[types.NamespacedName, *gwapiv1.GatewayStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
@@ -83,9 +86,9 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// HTTPRoute object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.HTTPRouteStatusMessageName},
-			r.resources.HTTPRouteStatuses.Subscribe(ctx),
+			r.subscriptions.httpRouteStatuses,
 			func(update message.Update[types.NamespacedName, *gwapiv1.HTTPRouteStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
@@ -103,8 +106,18 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 							errChan <- err
 							panic(err)
 						}
-						hCopy := h.DeepCopy()
-						hCopy.Status.Parents = mergeRouteParentStatus(h.Namespace, h.Status.Parents, val.Parents)
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForRouteStatus(&valCopy.RouteStatus, metav1.Now())
+						hCopy := &gwapiv1.HTTPRoute{
+							TypeMeta:   h.TypeMeta,
+							ObjectMeta: h.ObjectMeta,
+							Spec:       h.Spec,
+							Status: gwapiv1.HTTPRouteStatus{
+								RouteStatus: gwapiv1.RouteStatus{
+									Parents: mergeRouteParentStatus(h.Namespace, h.Status.Parents, valCopy.Parents),
+								},
+							},
+						}
 						return hCopy
 					}),
 				})
@@ -115,7 +128,9 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// GRPCRoute object status updater
 	go func() {
-		message.HandleSubscription(message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.GRPCRouteStatusMessageName}, r.resources.GRPCRouteStatuses.Subscribe(ctx),
+		message.HandleSubscription(r.log,
+			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.GRPCRouteStatusMessageName},
+			r.subscriptions.grpcRouteStatuses,
 			func(update message.Update[types.NamespacedName, *gwapiv1.GRPCRouteStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
@@ -133,8 +148,18 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 							errChan <- err
 							panic(err)
 						}
-						gCopy := g.DeepCopy()
-						gCopy.Status.Parents = mergeRouteParentStatus(g.Namespace, g.Status.Parents, val.Parents)
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForRouteStatus(&valCopy.RouteStatus, metav1.Now())
+						gCopy := &gwapiv1.GRPCRoute{
+							TypeMeta:   g.TypeMeta,
+							ObjectMeta: g.ObjectMeta,
+							Spec:       g.Spec,
+							Status: gwapiv1.GRPCRouteStatus{
+								RouteStatus: gwapiv1.RouteStatus{
+									Parents: mergeRouteParentStatus(g.Namespace, g.Status.Parents, valCopy.Parents),
+								},
+							},
+						}
 						return gCopy
 					}),
 				})
@@ -145,10 +170,10 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// TLSRoute object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.TLSRouteStatusMessageName},
-			r.resources.TLSRouteStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.TLSRouteStatus], errChan chan error) {
+			r.subscriptions.tlsRouteStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.TLSRouteStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -157,16 +182,26 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 				val := update.Value
 				r.statusUpdater.Send(Update{
 					NamespacedName: key,
-					Resource:       new(gwapiv1a2.TLSRoute),
+					Resource:       new(gwapiv1.TLSRoute),
 					Mutator: MutatorFunc(func(obj client.Object) client.Object {
-						t, ok := obj.(*gwapiv1a2.TLSRoute)
+						t, ok := obj.(*gwapiv1.TLSRoute)
 						if !ok {
 							err := fmt.Errorf("unsupported object type %T", obj)
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status.Parents = mergeRouteParentStatus(t.Namespace, t.Status.Parents, val.Parents)
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForRouteStatus(&valCopy.RouteStatus, metav1.Now())
+						tCopy := &gwapiv1.TLSRoute{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status: gwapiv1.TLSRouteStatus{
+								RouteStatus: gwapiv1.RouteStatus{
+									Parents: mergeRouteParentStatus(t.Namespace, t.Status.Parents, valCopy.Parents),
+								},
+							},
+						}
 						return tCopy
 					}),
 				})
@@ -177,10 +212,10 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// TCPRoute object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.TCPRouteStatusMessageName},
-			r.resources.TCPRouteStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.TCPRouteStatus], errChan chan error) {
+			r.subscriptions.tcpRouteStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.TCPRouteStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -189,16 +224,26 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 				val := update.Value
 				r.statusUpdater.Send(Update{
 					NamespacedName: key,
-					Resource:       new(gwapiv1a2.TCPRoute),
+					Resource:       new(gwapiv1.TCPRoute),
 					Mutator: MutatorFunc(func(obj client.Object) client.Object {
-						t, ok := obj.(*gwapiv1a2.TCPRoute)
+						t, ok := obj.(*gwapiv1.TCPRoute)
 						if !ok {
 							err := fmt.Errorf("unsupported object type %T", obj)
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status.Parents = mergeRouteParentStatus(t.Namespace, t.Status.Parents, val.Parents)
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForRouteStatus(&valCopy.RouteStatus, metav1.Now())
+						tCopy := &gwapiv1.TCPRoute{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status: gwapiv1.TCPRouteStatus{
+								RouteStatus: gwapiv1.RouteStatus{
+									Parents: mergeRouteParentStatus(t.Namespace, t.Status.Parents, valCopy.Parents),
+								},
+							},
+						}
 						return tCopy
 					}),
 				})
@@ -209,10 +254,10 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// UDPRoute object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.UDPRouteStatusMessageName},
-			r.resources.UDPRouteStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.UDPRouteStatus], errChan chan error) {
+			r.subscriptions.udpRouteStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.UDPRouteStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -221,16 +266,26 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 				val := update.Value
 				r.statusUpdater.Send(Update{
 					NamespacedName: key,
-					Resource:       new(gwapiv1a2.UDPRoute),
+					Resource:       new(gwapiv1.UDPRoute),
 					Mutator: MutatorFunc(func(obj client.Object) client.Object {
-						u, ok := obj.(*gwapiv1a2.UDPRoute)
+						u, ok := obj.(*gwapiv1.UDPRoute)
 						if !ok {
 							err := fmt.Errorf("unsupported object type %T", obj)
 							errChan <- err
 							panic(err)
 						}
-						uCopy := u.DeepCopy()
-						uCopy.Status.Parents = mergeRouteParentStatus(u.Namespace, u.Status.Parents, val.Parents)
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForRouteStatus(&valCopy.RouteStatus, metav1.Now())
+						uCopy := &gwapiv1.UDPRoute{
+							TypeMeta:   u.TypeMeta,
+							ObjectMeta: u.ObjectMeta,
+							Spec:       u.Spec,
+							Status: gwapiv1.UDPRouteStatus{
+								RouteStatus: gwapiv1.RouteStatus{
+									Parents: mergeRouteParentStatus(u.Namespace, u.Status.Parents, valCopy.Parents),
+								},
+							},
+						}
 						return uCopy
 					}),
 				})
@@ -239,12 +294,49 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 		r.log.Info("udpRoute status subscriber shutting down")
 	}()
 
+	// ListenerSet object status updater
+	go func() {
+		message.HandleSubscription(r.log,
+			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.ListenerSetStatusMessageName},
+			r.subscriptions.listenerSetStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.ListenerSetStatus], errChan chan error) {
+				if update.Delete {
+					return
+				}
+				r.statusUpdater.Send(Update{
+					NamespacedName: update.Key,
+					Resource:       new(gwapiv1.ListenerSet),
+					Mutator: MutatorFunc(func(obj client.Object) client.Object {
+						xls, ok := obj.(*gwapiv1.ListenerSet)
+						if !ok {
+							err := fmt.Errorf("unsupported object type %T", obj)
+							errChan <- err
+							panic(err)
+						}
+						statusCopy := update.Value.DeepCopy()
+						setLastTransitionTimeInConditions(statusCopy.Conditions, metav1.Now())
+						for i := range statusCopy.Listeners {
+							setLastTransitionTimeInConditions(statusCopy.Listeners[i].Conditions, metav1.Now())
+						}
+						return &gwapiv1.ListenerSet{
+							TypeMeta:   xls.TypeMeta,
+							ObjectMeta: xls.ObjectMeta,
+							Spec:       xls.Spec,
+							Status:     *statusCopy,
+						}
+					}),
+				})
+			},
+		)
+		r.log.Info("listenerSet status subscriber shutting down")
+	}()
+
 	// EnvoyPatchPolicy object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.EnvoyPatchPolicyStatusMessageName},
-			r.resources.EnvoyPatchPolicyStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.PolicyStatus], errChan chan error) {
+			r.subscriptions.envoyPatchPolicyStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.PolicyStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -261,8 +353,14 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status = *val
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForPolicyStatus(valCopy, metav1.Now())
+						tCopy := &egv1a1.EnvoyPatchPolicy{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status:     *valCopy,
+						}
 						return tCopy
 					}),
 				})
@@ -273,10 +371,10 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// ClientTrafficPolicy object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.ClientTrafficPolicyStatusMessageName},
-			r.resources.ClientTrafficPolicyStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.PolicyStatus], errChan chan error) {
+			r.subscriptions.clientTrafficPolicyStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.PolicyStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -293,8 +391,14 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status = *val
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForPolicyStatus(valCopy, metav1.Now())
+						tCopy := &egv1a1.ClientTrafficPolicy{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status:     *valCopy,
+						}
 						return tCopy
 					}),
 				})
@@ -305,10 +409,10 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// BackendTrafficPolicy object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.BackendTrafficPolicyStatusMessageName},
-			r.resources.BackendTrafficPolicyStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.PolicyStatus], errChan chan error) {
+			r.subscriptions.backendTrafficPolicyStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.PolicyStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -325,8 +429,14 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status = *val
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForPolicyStatus(valCopy, metav1.Now())
+						tCopy := &egv1a1.BackendTrafficPolicy{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status:     *valCopy,
+						}
 						return tCopy
 					}),
 				})
@@ -337,10 +447,10 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// SecurityPolicy object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.SecurityPolicyStatusMessageName},
-			r.resources.SecurityPolicyStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.PolicyStatus], errChan chan error) {
+			r.subscriptions.securityPolicyStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.PolicyStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -357,8 +467,14 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status = *val
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForPolicyStatus(valCopy, metav1.Now())
+						tCopy := &egv1a1.SecurityPolicy{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status:     *valCopy,
+						}
 						return tCopy
 					}),
 				})
@@ -369,8 +485,13 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// BackendTLSPolicy object status updater
 	go func() {
-		message.HandleSubscription(message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.BackendTLSPolicyStatusMessageName}, r.resources.BackendTLSPolicyStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.PolicyStatus], errChan chan error) {
+		message.HandleSubscription(r.log,
+			message.Metadata{
+				Runner:  string(egv1a1.LogComponentProviderRunner),
+				Message: message.BackendTLSPolicyStatusMessageName,
+			},
+			r.subscriptions.backendTLSPolicyStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.PolicyStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -379,16 +500,22 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 				val := update.Value
 				r.statusUpdater.Send(Update{
 					NamespacedName: key,
-					Resource:       new(gwapiv1a3.BackendTLSPolicy),
+					Resource:       new(gwapiv1.BackendTLSPolicy),
 					Mutator: MutatorFunc(func(obj client.Object) client.Object {
-						t, ok := obj.(*gwapiv1a3.BackendTLSPolicy)
+						t, ok := obj.(*gwapiv1.BackendTLSPolicy)
 						if !ok {
 							err := fmt.Errorf("unsupported object type %T", obj)
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status = *val
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForPolicyStatus(valCopy, metav1.Now())
+						tCopy := &gwapiv1.BackendTLSPolicy{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status:     *valCopy,
+						}
 						return tCopy
 					}),
 				})
@@ -399,10 +526,10 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// EnvoyExtensionPolicy object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.EnvoyExtensionPolicyStatusMessageName},
-			r.resources.EnvoyExtensionPolicyStatuses.Subscribe(ctx),
-			func(update message.Update[types.NamespacedName, *gwapiv1a2.PolicyStatus], errChan chan error) {
+			r.subscriptions.envoyExtensionPolicyStatuses,
+			func(update message.Update[types.NamespacedName, *gwapiv1.PolicyStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
 					return
@@ -419,8 +546,14 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status = *val
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForPolicyStatus(valCopy, metav1.Now())
+						tCopy := &egv1a1.EnvoyExtensionPolicy{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status:     *valCopy,
+						}
 						return tCopy
 					}),
 				})
@@ -431,9 +564,9 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 
 	// Backend object status updater
 	go func() {
-		message.HandleSubscription(
+		message.HandleSubscription(r.log,
 			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.BackendStatusMessageName},
-			r.resources.BackendStatuses.Subscribe(ctx),
+			r.subscriptions.backendStatuses,
 			func(update message.Update[types.NamespacedName, *egv1a1.BackendStatus], errChan chan error) {
 				// skip delete updates.
 				if update.Delete {
@@ -451,8 +584,14 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 							errChan <- err
 							panic(err)
 						}
-						tCopy := t.DeepCopy()
-						tCopy.Status = *val
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditions(valCopy.Conditions, metav1.Now())
+						tCopy := &egv1a1.Backend{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status:     *valCopy,
+						}
 						return tCopy
 					}),
 				})
@@ -464,10 +603,10 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 	if extensionManagerEnabled {
 		// ExtensionServerPolicy object status updater
 		go func() {
-			message.HandleSubscription(
+			message.HandleSubscription(r.log,
 				message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.ExtensionServerPoliciesStatusMessageName},
-				r.resources.ExtensionPolicyStatuses.Subscribe(ctx),
-				func(update message.Update[message.NamespacedNameAndGVK, *gwapiv1a2.PolicyStatus], errChan chan error) {
+				r.subscriptions.extensionPolicyStatuses,
+				func(update message.Update[message.NamespacedNameAndGVK, *gwapiv1.PolicyStatus], errChan chan error) {
 					// skip delete updates.
 					if update.Delete {
 						return
@@ -487,8 +626,16 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 								errChan <- err
 								panic(err)
 							}
-							tCopy := t.DeepCopy()
-							tCopy.Object["status"] = *val
+							valCopy := val.DeepCopy()
+							setLastTransitionTimeInConditionsForPolicyStatus(valCopy, metav1.Now())
+							objMap := make(map[string]interface{}, len(t.Object))
+							for k, v := range t.Object {
+								if k != "status" {
+									objMap[k] = v
+								}
+							}
+							objMap["status"] = *valCopy
+							tCopy := &unstructured.Unstructured{Object: objMap}
 							return tCopy
 						}),
 					})
@@ -497,56 +644,92 @@ func (r *gatewayAPIReconciler) subscribeAndUpdateStatus(ctx context.Context, ext
 			r.log.Info("extensionServerPolicies status subscriber shutting down")
 		}()
 	}
+
+	// EnvoyProxy status updater
+	go func() {
+		message.HandleSubscription(r.log,
+			message.Metadata{Runner: string(egv1a1.LogComponentProviderRunner), Message: message.EnvoyProxyStatusMessageName},
+			r.subscriptions.envoyProxyStatuses,
+			func(update message.Update[types.NamespacedName, *egv1a1.EnvoyProxyStatus], errChan chan error) {
+				// skip delete updates.
+				if update.Delete {
+					return
+				}
+				key := update.Key
+				val := update.Value
+				r.statusUpdater.Send(Update{
+					NamespacedName: key,
+					Resource:       new(egv1a1.EnvoyProxy),
+					Mutator: MutatorFunc(func(obj client.Object) client.Object {
+						t, ok := obj.(*egv1a1.EnvoyProxy)
+						if !ok {
+							err := fmt.Errorf("unsupported object type %T", obj)
+							errChan <- err
+							panic(err)
+						}
+						valCopy := val.DeepCopy()
+						setLastTransitionTimeInConditionsForEnvoyProxyStatus(valCopy, metav1.Now())
+						tCopy := &egv1a1.EnvoyProxy{
+							TypeMeta:   t.TypeMeta,
+							ObjectMeta: t.ObjectMeta,
+							Spec:       t.Spec,
+							Status: egv1a1.EnvoyProxyStatus{
+								Ancestors: valCopy.Ancestors,
+							},
+						}
+						return tCopy
+					}),
+				})
+			},
+		)
+		r.log.Info("envoyProxy status subscriber shutting down")
+	}()
 }
 
 // mergeRouteParentStatus merges the old and new RouteParentStatus.
 // This is needed because the RouteParentStatus doesn't support strategic merge patch yet.
 func mergeRouteParentStatus(ns string, old, new []gwapiv1.RouteParentStatus) []gwapiv1.RouteParentStatus {
-	merged := make([]gwapiv1.RouteParentStatus, len(old))
-	_ = copy(merged, old)
-	for _, parent := range new {
+	// Allocating with worst-case capacity to avoid reallocation.
+	merged := make([]gwapiv1.RouteParentStatus, 0, len(old)+len(new))
+
+	// Range over old status parentRefs in order:
+	// 1. The parentRef exists in the new status: append the new one to the final status.
+	// 2. The parentRef doesn't exist in the new status and it's not our controller: append it to the final status.
+	// 3. The parentRef doesn't exist in the new status, and it is our controller: keep it in the final status.
+	//    This is important for routes with multiple parent references - not all parents are updated in each reconciliation.
+	for _, oldP := range old {
 		found := -1
-		for i, existing := range old {
-			if isParentRefEqual(parent.ParentRef, existing.ParentRef, ns) {
-				found = i
+		for newI, newP := range new {
+			if gatewayapi.IsParentRefEqual(oldP.ParentRef, newP.ParentRef, ns) {
+				found = newI
 				break
 			}
 		}
 		if found >= 0 {
-			merged[found] = parent
+			merged = append(merged, new[found])
 		} else {
-			merged = append(merged, parent)
+			// Keep all old parent statuses, regardless of controller.
+			// For routes with multiple parents managed by the same controller,
+			// not all parents are necessarily updated in each reconciliation.
+			merged = append(merged, oldP)
+		}
+	}
+
+	// Range over new status parentRefs and make sure every parentRef exists in the final status. If not, append it.
+	for _, newP := range new {
+		found := false
+		for _, mergedP := range merged {
+			if gatewayapi.IsParentRefEqual(newP.ParentRef, mergedP.ParentRef, ns) {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			merged = append(merged, newP)
 		}
 	}
 	return merged
-}
-
-func isParentRefEqual(ref1, ref2 gwapiv1.ParentReference, routeNS string) bool {
-	defaultGroup := (*gwapiv1.Group)(&gwapiv1.GroupVersion.Group)
-	if ref1.Group == nil {
-		ref1.Group = defaultGroup
-	}
-	if ref2.Group == nil {
-		ref2.Group = defaultGroup
-	}
-
-	defaultKind := gwapiv1.Kind(resource.KindGateway)
-	if ref1.Kind == nil {
-		ref1.Kind = &defaultKind
-	}
-	if ref2.Kind == nil {
-		ref2.Kind = &defaultKind
-	}
-
-	// If the parent's namespace is not set, default to the namespace of the Route.
-	defaultNS := gwapiv1.Namespace(routeNS)
-	if ref1.Namespace == nil {
-		ref1.Namespace = &defaultNS
-	}
-	if ref2.Namespace == nil {
-		ref2.Namespace = &defaultNS
-	}
-	return reflect.DeepEqual(ref1, ref2)
 }
 
 func (r *gatewayAPIReconciler) updateStatusForGateway(ctx context.Context, gtw *gwapiv1.Gateway) {
@@ -590,11 +773,45 @@ func (r *gatewayAPIReconciler) updateStatusForGateway(ctx context.Context, gtw *
 			if !ok {
 				panic(fmt.Sprintf("unsupported object type %T", obj))
 			}
-			gCopy := g.DeepCopy()
-			gCopy.Status.Conditions = gtw.Status.Conditions
-			gCopy.Status.Addresses = gtw.Status.Addresses
-			gCopy.Status.Listeners = gtw.Status.Listeners
+			statusCopy := gtw.Status.DeepCopy()
+			setLastTransitionTimeInConditions(statusCopy.Conditions, metav1.Now())
+			for i := range statusCopy.Listeners {
+				setLastTransitionTimeInConditions(statusCopy.Listeners[i].Conditions, metav1.Now())
+			}
+			gCopy := &gwapiv1.Gateway{
+				TypeMeta:   g.TypeMeta,
+				ObjectMeta: g.ObjectMeta,
+				Spec:       g.Spec,
+				Status:     *statusCopy,
+			}
 			return gCopy
 		}),
 	})
+}
+
+// setLastTransitionTimeInConditions sets LastTransitionTime to the given time for all conditions in a slice
+func setLastTransitionTimeInConditions(conditions []metav1.Condition, now metav1.Time) {
+	for i := range conditions {
+		conditions[i].LastTransitionTime = now
+	}
+}
+
+// setLastTransitionTimeInConditionsForPolicyStatus sets LastTransitionTime for Policy status conditions
+func setLastTransitionTimeInConditionsForPolicyStatus(status *gwapiv1.PolicyStatus, now metav1.Time) {
+	for i := range status.Ancestors {
+		setLastTransitionTimeInConditions(status.Ancestors[i].Conditions, now)
+	}
+}
+
+func setLastTransitionTimeInConditionsForEnvoyProxyStatus(status *egv1a1.EnvoyProxyStatus, now metav1.Time) {
+	for i := range status.Ancestors {
+		setLastTransitionTimeInConditions(status.Ancestors[i].Conditions, now)
+	}
+}
+
+// setLastTransitionTimeInConditionsForRouteStatus sets LastTransitionTime for Route status conditions
+func setLastTransitionTimeInConditionsForRouteStatus(status *gwapiv1.RouteStatus, now metav1.Time) {
+	for i := range status.Parents {
+		setLastTransitionTimeInConditions(status.Parents[i].Conditions, now)
+	}
 }

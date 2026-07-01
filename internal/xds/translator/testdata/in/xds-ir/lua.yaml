@@ -2,7 +2,6 @@ http:
 - address: 0.0.0.0
   hostnames:
   - '*'
-  isHTTP2: false
   name: envoy-gateway/gateway-1/http
   path:
     escapedSlashesAction: UnescapeAndRedirect
@@ -32,6 +31,9 @@ http:
           request_handle:logInfo('Goodbye.')
           end
         name: envoyextensionpolicy/default/policy-for-http-route/lua/0
+        filterContext:
+          token_header: x-api-key
+          mode: strict
   - destination:
       name: httproute/default/httproute-2/rule/0
       settings:

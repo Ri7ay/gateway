@@ -1,8 +1,14 @@
+gatewayClass:
+  apiVersion: gateway.networking.k8s.io/v1
+  kind: GatewayClass
+  metadata:
+    name: eg
+  spec:
+    controllerName: gateway.envoyproxy.io/gatewayclass-controller
 gateways:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: Gateway
   metadata:
-    creationTimestamp: null
     name: eg
     namespace: envoy-gateway-system
   spec:
@@ -43,7 +49,6 @@ httpRoutes:
 - apiVersion: gateway.networking.k8s.io/v1
   kind: HTTPRoute
   metadata:
-    creationTimestamp: null
     name: backend
     namespace: envoy-gateway-system
   spec:
@@ -86,8 +91,7 @@ infraIR:
   envoy-gateway-system/eg:
     proxy:
       listeners:
-      - address: null
-        name: envoy-gateway-system/eg/http
+      - name: envoy-gateway-system/eg/http
         ports:
         - containerPort: 10080
           name: http-80
@@ -109,9 +113,9 @@ xdsIR:
       - path: /dev/stdout
     http:
     - address: 0.0.0.0
+      externalPort: 80
       hostnames:
       - '*'
-      isHTTP2: false
       metadata:
         kind: Gateway
         name: eg

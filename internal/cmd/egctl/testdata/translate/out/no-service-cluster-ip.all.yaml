@@ -15,6 +15,8 @@ xds:
               portValue: 19000
         clusterManager:
           localClusterName: local_cluster
+        deferredStatOptions:
+          enableDeferredCreationStats: true
         dynamicResources:
           adsConfig:
             apiType: DELTA_GRPC
@@ -25,9 +27,11 @@ xds:
             transportApiVersion: V3
           cdsConfig:
             ads: {}
+            initialFetchTimeout: 0s
             resourceApiVersion: V3
           ldsConfig:
             ads: {}
+            initialFetchTimeout: 0s
             resourceApiVersion: V3
         layeredRuntime:
           layers:
@@ -61,21 +65,22 @@ xds:
             name: prometheus_stats
             type: STATIC
           - connectTimeout: 10s
-            loadAssignment:
-              clusterName: local_cluster
-              endpoints:
-              - lbEndpoints:
-                - endpoint:
-                    address:
-                      socketAddress:
-                        address: 127.0.0.1
-                        portValue: 10080
-                  loadBalancingWeight: 1
-                loadBalancingWeight: 1
-                locality:
-                  zone: $(ENVOY_SERVICE_ZONE)
+            edsClusterConfig:
+              edsConfig:
+                ads: {}
+                resourceApiVersion: V3
+              serviceName: local_cluster
+            loadBalancingPolicy:
+              policies:
+              - typedExtensionConfig:
+                  name: envoy.load_balancing_policies.least_request
+                  typedConfig:
+                    '@type': type.googleapis.com/envoy.extensions.load_balancing_policies.least_request.v3.LeastRequest
+                    localityLbConfig:
+                      zoneAwareLbConfig:
+                        minClusterSize: "1"
             name: local_cluster
-            type: STATIC
+            type: EDS
           - connectTimeout: 10s
             loadAssignment:
               clusterName: xds_cluster
@@ -150,6 +155,17 @@ xds:
                           cluster: prometheus_stats
                   statPrefix: eg-stats-http
             name: envoy-gateway-proxy-stats-0.0.0.0-19001
+        statsConfig:
+          statsTags:
+          - regex: \.zone(\.(([^\.]+)\.))
+            tagName: from_zone
+          - regex: \.zone\.[^\.]+\.(([^\.]+)\.)
+            tagName: to_zone
+          - regex: ^cluster(\..+\.(.+))\.total_match_count$
+            tagName: socket_match_name
+          - regex: circuit_breakers\.((.+?)\.).+
+            tagName: priority
+          useAllDefaultTags: true
     - '@type': type.googleapis.com/envoy.admin.v3.EndpointsConfigDump
       dynamicEndpointConfigs:
       - endpointConfig:
@@ -190,7 +206,6 @@ xds:
               resourceApiVersion: V3
             serviceName: httproute/envoy-gateway-system/routes/rule/0
           ignoreHealthOnHostRemoval: true
-          lbPolicy: LEAST_REQUEST
           loadBalancingPolicy:
             policies:
             - typedExtensionConfig:

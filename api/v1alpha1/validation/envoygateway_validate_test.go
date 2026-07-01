@@ -405,6 +405,10 @@ func TestValidateEnvoyGateway(t *testing.T) {
 									Kind: &TLSSecretKind,
 									Name: gwapiv1.ObjectName("certificate"),
 								},
+								ClientCertificateRef: &gwapiv1.SecretObjectReference{
+									Kind: &TLSSecretKind,
+									Name: gwapiv1.ObjectName("client-certificate"),
+								},
 							},
 						},
 					},
@@ -437,6 +441,10 @@ func TestValidateEnvoyGateway(t *testing.T) {
 								CertificateRef: gwapiv1.SecretObjectReference{
 									Kind: &TLSSecretKind,
 									Name: gwapiv1.ObjectName("certificate"),
+								},
+								ClientCertificateRef: &gwapiv1.SecretObjectReference{
+									Kind: &TLSSecretKind,
+									Name: gwapiv1.ObjectName("client-certificate"),
 								},
 							},
 						},
@@ -477,6 +485,10 @@ func TestValidateEnvoyGateway(t *testing.T) {
 								CertificateRef: gwapiv1.SecretObjectReference{
 									Kind: &TLSUnrecognizedKind,
 									Name: gwapiv1.ObjectName("certificate"),
+								},
+								ClientCertificateRef: &gwapiv1.SecretObjectReference{
+									Kind: &TLSSecretKind,
+									Name: gwapiv1.ObjectName("client-certificate"),
 								},
 							},
 						},
@@ -650,6 +662,45 @@ func TestValidateEnvoyGateway(t *testing.T) {
 								{
 									Type: egv1a1.MetricSinkTypeOpenTelemetry,
 								},
+							},
+						},
+					},
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "valid gateway traces sink",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					Telemetry: &egv1a1.EnvoyGatewayTelemetry{
+						Traces: &egv1a1.EnvoyGatewayTraces{
+							Sink: egv1a1.EnvoyGatewayTraceSink{
+								Type: egv1a1.TraceSinkTypeOpenTelemetry,
+								OpenTelemetry: &egv1a1.EnvoyGatewayOpenTelemetrySink{
+									Host:     "otel-collector.monitoring.svc.cluster.local",
+									Protocol: "grpc",
+									Port:     4317,
+								},
+							},
+						},
+					},
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "invalid gateway traces sink",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					Telemetry: &egv1a1.EnvoyGatewayTelemetry{
+						Traces: &egv1a1.EnvoyGatewayTraces{
+							Sink: egv1a1.EnvoyGatewayTraceSink{
+								Type: egv1a1.TraceSinkTypeOpenTelemetry,
 							},
 						},
 					},
@@ -857,6 +908,152 @@ func TestValidateEnvoyGateway(t *testing.T) {
 			},
 			expect: false,
 		},
+		{
+			name: "both extensionManager and extensionManagers set",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					ExtensionManager: &egv1a1.ExtensionManager{
+						Hooks: &egv1a1.ExtensionHooks{
+							XDSTranslator: &egv1a1.XDSTranslatorHooks{
+								Post: []egv1a1.XDSTranslatorHook{egv1a1.XDSRoute},
+							},
+						},
+						Service: &egv1a1.ExtensionService{Host: "foo.extension", Port: 80},
+					},
+					ExtensionManagers: []egv1a1.ExtensionManager{
+						{
+							Name: "ext1",
+							Hooks: &egv1a1.ExtensionHooks{
+								XDSTranslator: &egv1a1.XDSTranslatorHooks{
+									Post: []egv1a1.XDSTranslatorHook{egv1a1.XDSRoute},
+								},
+							},
+							Service: &egv1a1.ExtensionService{Host: "bar.extension", Port: 80},
+						},
+					},
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "extensionManagers explicitly empty",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:           egv1a1.DefaultGateway(),
+					Provider:          egv1a1.DefaultEnvoyGatewayProvider(),
+					ExtensionManagers: []egv1a1.ExtensionManager{},
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "extensionManagers with duplicate names",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					ExtensionManagers: []egv1a1.ExtensionManager{
+						{
+							Name: "ext1",
+							Hooks: &egv1a1.ExtensionHooks{
+								XDSTranslator: &egv1a1.XDSTranslatorHooks{
+									Post: []egv1a1.XDSTranslatorHook{egv1a1.XDSRoute},
+								},
+							},
+							Service: &egv1a1.ExtensionService{Host: "foo.extension", Port: 80},
+						},
+						{
+							Name: "ext1",
+							Hooks: &egv1a1.ExtensionHooks{
+								XDSTranslator: &egv1a1.XDSTranslatorHooks{
+									Post: []egv1a1.XDSTranslatorHook{egv1a1.XDSRoute},
+								},
+							},
+							Service: &egv1a1.ExtensionService{Host: "bar.extension", Port: 80},
+						},
+					},
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "extensionManagers with missing name",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					ExtensionManagers: []egv1a1.ExtensionManager{
+						{
+							Hooks: &egv1a1.ExtensionHooks{
+								XDSTranslator: &egv1a1.XDSTranslatorHooks{
+									Post: []egv1a1.XDSTranslatorHook{egv1a1.XDSRoute},
+								},
+							},
+							Service: &egv1a1.ExtensionService{Host: "foo.extension", Port: 80},
+						},
+					},
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "extensionManagers with invalid individual extension manager",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					ExtensionManagers: []egv1a1.ExtensionManager{
+						{
+							Name: "good-ext",
+							Hooks: &egv1a1.ExtensionHooks{
+								XDSTranslator: &egv1a1.XDSTranslatorHooks{
+									Post: []egv1a1.XDSTranslatorHook{egv1a1.XDSRoute},
+								},
+							},
+							Service: &egv1a1.ExtensionService{Host: "good.extension", Port: 80},
+						},
+						{
+							Name: "bad-ext",
+							// Missing hooks → should fail individual validation
+							Service: &egv1a1.ExtensionService{Host: "bad.extension", Port: 80},
+						},
+					},
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "valid extensionManagers plural config",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					ExtensionManagers: []egv1a1.ExtensionManager{
+						{
+							Name: "ai-gateway",
+							Hooks: &egv1a1.ExtensionHooks{
+								XDSTranslator: &egv1a1.XDSTranslatorHooks{
+									Post: []egv1a1.XDSTranslatorHook{egv1a1.XDSRoute, egv1a1.XDSTranslation},
+								},
+							},
+							Service: &egv1a1.ExtensionService{Host: "ai-gw.extension", Port: 80},
+						},
+						{
+							Name: "observability",
+							Hooks: &egv1a1.ExtensionHooks{
+								XDSTranslator: &egv1a1.XDSTranslatorHooks{
+									Post: []egv1a1.XDSTranslatorHook{egv1a1.XDSHTTPListener},
+								},
+							},
+							Service: &egv1a1.ExtensionService{Host: "obs.extension", Port: 80},
+						},
+					},
+				},
+			},
+			expect: true,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -889,6 +1086,31 @@ func TestEnvoyGateway(t *testing.T) {
 	gatewayLogging.SetEnvoyGatewayLoggingDefaults()
 	assert.NotNil(t, gatewayLogging)
 	assert.Equal(t, egv1a1.LogLevelInfo, gatewayLogging.Level[egv1a1.LogComponentGatewayDefault])
+}
+
+func TestValidateEnvoyGatewayXDSServer(t *testing.T) {
+	t.Run("valid no overrides", func(t *testing.T) {
+		require.NoError(t, validateEnvoyGatewayXDSServer(nil))
+	})
+
+	t.Run("valid overrides", func(t *testing.T) {
+		age := gwapiv1.Duration("30m")
+		grace := gwapiv1.Duration("1m")
+		x := &egv1a1.XDSServer{MaxConnectionAge: &age, MaxConnectionAgeGrace: &grace}
+		require.NoError(t, validateEnvoyGatewayXDSServer(x))
+	})
+
+	t.Run("invalid duration", func(t *testing.T) {
+		age := gwapiv1.Duration("bad")
+		x := &egv1a1.XDSServer{MaxConnectionAge: &age}
+		require.Error(t, validateEnvoyGatewayXDSServer(x))
+	})
+
+	t.Run("non positive", func(t *testing.T) {
+		age := gwapiv1.Duration("0s")
+		x := &egv1a1.XDSServer{MaxConnectionAgeGrace: &age}
+		require.Error(t, validateEnvoyGatewayXDSServer(x))
+	})
 }
 
 func TestDefaultEnvoyGatewayLoggingLevel(t *testing.T) {
@@ -1095,4 +1317,148 @@ func TestEnvoyGatewayTelemetry(t *testing.T) {
 	assert.NotNil(t, eg.Telemetry.Metrics)
 	assert.False(t, eg.Telemetry.Metrics.Prometheus.Disable)
 	assert.Nil(t, eg.Telemetry.Metrics.Sinks)
+}
+
+func TestGetExtensionManagers(t *testing.T) {
+	t.Run("both nil returns nil", func(t *testing.T) {
+		spec := egv1a1.EnvoyGatewaySpec{}
+		assert.Nil(t, spec.GetExtensionManagers())
+	})
+
+	t.Run("only singular set returns it as slice", func(t *testing.T) {
+		ext := egv1a1.ExtensionManager{Name: "ext1"}
+		spec := egv1a1.EnvoyGatewaySpec{
+			ExtensionManager: &ext,
+		}
+		result := spec.GetExtensionManagers()
+		require.Len(t, result, 1)
+		assert.Equal(t, "ext1", result[0].Name)
+	})
+
+	t.Run("only plural set returns plural", func(t *testing.T) {
+		spec := egv1a1.EnvoyGatewaySpec{
+			ExtensionManagers: []egv1a1.ExtensionManager{
+				{Name: "ext1"},
+				{Name: "ext2"},
+			},
+		}
+		result := spec.GetExtensionManagers()
+		require.Len(t, result, 2)
+		assert.Equal(t, "ext1", result[0].Name)
+		assert.Equal(t, "ext2", result[1].Name)
+	})
+
+	t.Run("both set returns plural (plural takes precedence)", func(t *testing.T) {
+		ext := egv1a1.ExtensionManager{Name: "singular"}
+		spec := egv1a1.EnvoyGatewaySpec{
+			ExtensionManager: &ext,
+			ExtensionManagers: []egv1a1.ExtensionManager{
+				{Name: "plural1"},
+				{Name: "plural2"},
+			},
+		}
+		result := spec.GetExtensionManagers()
+		require.Len(t, result, 2)
+		assert.Equal(t, "plural1", result[0].Name)
+		assert.Equal(t, "plural2", result[1].Name)
+	})
+}
+
+func TestWarnEnvoyGateway(t *testing.T) {
+	eg := egv1a1.DefaultEnvoyGateway()
+
+	testCases := []struct {
+		name     string
+		eg       *egv1a1.EnvoyGateway
+		expected []string
+	}{
+		{
+			name:     "nil EnvoyGateway",
+			eg:       nil,
+			expected: nil,
+		},
+		{
+			name:     "nil ExtensionAPIs",
+			eg:       eg,
+			expected: nil,
+		},
+		{
+			name: "disableLua is set",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					ExtensionAPIs: &egv1a1.ExtensionAPISettings{
+						DisableLua: new(true),
+					},
+				},
+			},
+			expected: []string{"disableLua is deprecated, use enableLua instead"},
+		},
+		{
+			name: "enableLua is set",
+			eg: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					Gateway:  egv1a1.DefaultGateway(),
+					Provider: egv1a1.DefaultEnvoyGatewayProvider(),
+					ExtensionAPIs: &egv1a1.ExtensionAPISettings{
+						EnableLua: true,
+					},
+				},
+			},
+			expected: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			warnings := WarnEnvoyGateway(tc.eg)
+			assert.Equal(t, tc.expected, warnings)
+		})
+	}
+}
+
+func TestLuaDisabled(t *testing.T) {
+	testCases := []struct {
+		name     string
+		ext      *egv1a1.ExtensionAPISettings
+		expected bool
+	}{
+		{
+			name:     "nil ExtensionAPISettings",
+			ext:      nil,
+			expected: true,
+		},
+		{
+			name:     "neither set - defaults to disabled",
+			ext:      &egv1a1.ExtensionAPISettings{},
+			expected: true,
+		},
+		{
+			name:     "enableLua true",
+			ext:      &egv1a1.ExtensionAPISettings{EnableLua: true},
+			expected: false,
+		},
+		{
+			name:     "disableLua true",
+			ext:      &egv1a1.ExtensionAPISettings{DisableLua: new(true)},
+			expected: true,
+		},
+		{
+			name:     "disableLua false (explicit enable via deprecated field)",
+			ext:      &egv1a1.ExtensionAPISettings{DisableLua: new(false)},
+			expected: false,
+		},
+		{
+			name:     "enableLua takes precedence over disableLua",
+			ext:      &egv1a1.ExtensionAPISettings{EnableLua: true, DisableLua: new(true)},
+			expected: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expected, tc.ext.LuaDisabled())
+		})
+	}
 }

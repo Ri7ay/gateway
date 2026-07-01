@@ -13,13 +13,98 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/gatewayapi/resource"
 	"github.com/envoyproxy/gateway/internal/gatewayapi/status"
 	"github.com/envoyproxy/gateway/internal/ir"
 )
+
+func TestAppProtocolToIRAppProtocol(t *testing.T) {
+	tests := []struct {
+		name            string
+		appProtocol     string
+		defaultProtocol ir.AppProtocol
+		want            ir.AppProtocol
+		wantForceHTTP1  bool
+	}{
+		{
+			name:            "h2c service convention",
+			appProtocol:     "kubernetes.io/h2c",
+			defaultProtocol: ir.HTTP,
+			want:            ir.HTTP2,
+		},
+		{
+			name:            "h2c backend convention",
+			appProtocol:     "gateway.envoyproxy.io/h2c",
+			defaultProtocol: ir.HTTP,
+			want:            ir.HTTP2,
+		},
+		{
+			name:            "ws service convention",
+			appProtocol:     "kubernetes.io/ws",
+			defaultProtocol: ir.HTTP,
+			want:            ir.HTTP,
+			wantForceHTTP1:  true,
+		},
+		{
+			name:            "wss service convention",
+			appProtocol:     "kubernetes.io/wss",
+			defaultProtocol: ir.HTTP,
+			want:            ir.HTTP,
+			wantForceHTTP1:  true,
+		},
+		{
+			name:            "ws backend convention",
+			appProtocol:     "gateway.envoyproxy.io/ws",
+			defaultProtocol: ir.HTTP,
+			want:            ir.HTTP,
+			wantForceHTTP1:  true,
+		},
+		{
+			name:            "wss backend convention",
+			appProtocol:     "gateway.envoyproxy.io/wss",
+			defaultProtocol: ir.HTTP,
+			want:            ir.HTTP,
+			wantForceHTTP1:  true,
+		},
+		{
+			name:            "grpc",
+			appProtocol:     "grpc",
+			defaultProtocol: ir.HTTP,
+			want:            ir.GRPC,
+		},
+		{
+			name:            "unknown",
+			appProtocol:     "example.com/custom",
+			defaultProtocol: ir.HTTP,
+			want:            ir.HTTP,
+		},
+		{
+			// appProtocol must not refine the protocol of non-HTTP (L4) routes.
+			name:            "h2c ignored on non-HTTP route",
+			appProtocol:     "kubernetes.io/h2c",
+			defaultProtocol: ir.TCP,
+			want:            ir.TCP,
+		},
+		{
+			name:            "grpc ignored on non-HTTP route",
+			appProtocol:     "grpc",
+			defaultProtocol: ir.TCP,
+			want:            ir.TCP,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			protocol := resolveBackendProtocol(tt.appProtocol, tt.defaultProtocol)
+			require.Equal(t, tt.want, protocol)
+			ap := tt.appProtocol
+			require.Equal(t, tt.wantForceHTTP1, shouldForceHTTP1Upstream(protocol, &ap))
+		})
+	}
+}
 
 func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 	tests := []struct {
@@ -41,7 +126,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"192.0.2.2"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 				{
@@ -51,7 +136,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"2001:db8::1"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 			},
@@ -74,7 +159,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"192.0.2.1"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 				{
@@ -84,7 +169,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"example.com"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 			},
@@ -107,7 +192,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"192.0.2.2"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 				{
@@ -118,7 +203,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"2001:db8::2"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 			},
@@ -142,7 +227,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"192.0.2.1"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 				{
@@ -152,7 +237,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"2001:db8::1"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 				{
@@ -162,7 +247,7 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 						{Addresses: []string{"example.com"}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 			},
@@ -176,24 +261,24 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 			expectedAddrType: ir.MIXED,
 		},
 		{
-			name: "Keep serving and terminating as draining",
+			name: "Keep non-serving or terminating as draining",
 			endpointSlices: []*discoveryv1.EndpointSlice{
 				{
 					ObjectMeta:  metav1.ObjectMeta{Name: "slice1"},
 					AddressType: discoveryv1.AddressTypeIPv4,
 					Endpoints: []discoveryv1.Endpoint{
 						{Addresses: []string{"192.0.2.1"}, Conditions: discoveryv1.EndpointConditions{
-							Ready: ptr.To(false), Serving: ptr.To(true), Terminating: ptr.To(true),
+							Ready: new(false), Serving: new(true), Terminating: new(true),
 						}},
 						{Addresses: []string{"192.0.2.2"}, Conditions: discoveryv1.EndpointConditions{
-							Ready: ptr.To(false), Serving: ptr.To(false), Terminating: ptr.To(true),
+							Ready: new(false), Serving: new(false), Terminating: new(true),
 						}},
 						{Addresses: []string{"192.0.2.3"}, Conditions: discoveryv1.EndpointConditions{
-							Ready: ptr.To(false),
+							Ready: new(false),
 						}},
 					},
 					Ports: []discoveryv1.EndpointPort{
-						{Name: ptr.To("http"), Port: ptr.To(int32(80)), Protocol: ptr.To(corev1.ProtocolTCP)},
+						{Name: new("http"), Port: new(int32(80)), Protocol: new(corev1.ProtocolTCP)},
 					},
 				},
 			},
@@ -201,6 +286,8 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 			portProtocol: corev1.ProtocolTCP,
 			expectedEndpoints: []*ir.DestinationEndpoint{
 				{Host: "192.0.2.1", Port: 80, Draining: true},
+				{Host: "192.0.2.2", Port: 80, Draining: true},
+				{Host: "192.0.2.3", Port: 80, Draining: true},
 			},
 			expectedAddrType: ir.IP,
 		},
@@ -230,8 +317,108 @@ func TestGetIREndpointsFromEndpointSlices(t *testing.T) {
 	}
 }
 
+func TestBuildRouteMatchCombinations(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		ruleMatches   []gwapiv1.HTTPRouteMatch
+		filterMatches []egv1a1.HTTPRouteMatchFilter
+		expected      []routeMatchCombination
+	}{
+		{
+			name:     "no rule or filter matches",
+			expected: nil,
+		},
+		{
+			name: "filter matches only",
+			filterMatches: []egv1a1.HTTPRouteMatchFilter{
+				{Cookies: []egv1a1.HTTPCookieMatch{{Name: "a", Value: "1"}}},
+				{Cookies: []egv1a1.HTTPCookieMatch{{Name: "b", Value: "2"}}},
+			},
+			expected: []routeMatchCombination{
+				{
+					cookies: []egv1a1.HTTPCookieMatch{{Name: "a", Value: "1"}},
+				},
+				{
+					cookies: []egv1a1.HTTPCookieMatch{{Name: "b", Value: "2"}},
+				},
+			},
+		},
+		{
+			name: "rule matches only",
+			ruleMatches: []gwapiv1.HTTPRouteMatch{
+				{Path: &gwapiv1.HTTPPathMatch{Value: new("/foo")}},
+				{Path: &gwapiv1.HTTPPathMatch{Value: new("/bar")}},
+			},
+			expected: []routeMatchCombination{
+				{HTTPRouteMatch: gwapiv1.HTTPRouteMatch{Path: &gwapiv1.HTTPPathMatch{Value: new("/foo")}}},
+				{HTTPRouteMatch: gwapiv1.HTTPRouteMatch{Path: &gwapiv1.HTTPPathMatch{Value: new("/bar")}}},
+			},
+		},
+		{
+			name: "rule and filter matches",
+			ruleMatches: []gwapiv1.HTTPRouteMatch{
+				{Path: &gwapiv1.HTTPPathMatch{Value: new("/foo")}},
+				{
+					Path: &gwapiv1.HTTPPathMatch{Value: new("/bar")},
+					Headers: []gwapiv1.HTTPHeaderMatch{
+						{Name: "a", Value: "1"},
+						{Name: "b", Value: "2"},
+						{Name: "c", Value: "3"},
+					},
+				},
+			},
+			filterMatches: []egv1a1.HTTPRouteMatchFilter{
+				{Cookies: []egv1a1.HTTPCookieMatch{{Name: "a", Value: "1"}}},
+				{Cookies: []egv1a1.HTTPCookieMatch{{Name: "b", Value: "2"}, {Name: "c", Value: "3"}}},
+			},
+			expected: []routeMatchCombination{
+				{
+					HTTPRouteMatch: gwapiv1.HTTPRouteMatch{Path: &gwapiv1.HTTPPathMatch{Value: new("/foo")}},
+					cookies:        []egv1a1.HTTPCookieMatch{{Name: "a", Value: "1"}},
+				},
+				{
+					HTTPRouteMatch: gwapiv1.HTTPRouteMatch{Path: &gwapiv1.HTTPPathMatch{Value: new("/foo")}},
+					cookies:        []egv1a1.HTTPCookieMatch{{Name: "b", Value: "2"}, {Name: "c", Value: "3"}},
+				},
+				{
+					HTTPRouteMatch: gwapiv1.HTTPRouteMatch{
+						Path: &gwapiv1.HTTPPathMatch{Value: new("/bar")},
+						Headers: []gwapiv1.HTTPHeaderMatch{
+							{Name: "a", Value: "1"},
+							{Name: "b", Value: "2"},
+							{Name: "c", Value: "3"},
+						},
+					},
+					cookies: []egv1a1.HTTPCookieMatch{{Name: "a", Value: "1"}},
+				},
+				{
+					HTTPRouteMatch: gwapiv1.HTTPRouteMatch{
+						Path: &gwapiv1.HTTPPathMatch{Value: new("/bar")},
+						Headers: []gwapiv1.HTTPHeaderMatch{
+							{Name: "a", Value: "1"},
+							{Name: "b", Value: "2"},
+							{Name: "c", Value: "3"},
+						},
+					},
+					cookies: []egv1a1.HTTPCookieMatch{{Name: "b", Value: "2"}, {Name: "c", Value: "3"}},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			combos := buildRouteMatchCombinations(tt.ruleMatches, tt.filterMatches)
+			require.Equal(t, tt.expected, combos)
+		})
+	}
+}
+
 func TestValidateDestinationSettings(t *testing.T) {
 	svcKind := gwapiv1.Kind(resource.KindService)
+	hostname := "www.gateway-test.com"
 
 	tests := []struct {
 		name                    string
@@ -241,17 +428,6 @@ func TestValidateDestinationSettings(t *testing.T) {
 		wantErr                 bool
 		wantReason              gwapiv1.RouteConditionReason
 	}{
-		{
-			name: "headless service rejected when endpointRoutingDisabled=true",
-			ds: &ir.DestinationSetting{
-				Name:      "headless",
-				Endpoints: []*ir.DestinationEndpoint{{Host: "None"}},
-			},
-			endpointRoutingDisabled: true,
-			kind:                    &svcKind,
-			wantErr:                 true,
-			wantReason:              status.RouteReasonUnsupportedSetting,
-		},
 		{
 			name: "normal service allowed with ClusterIP routing",
 			ds: &ir.DestinationSetting{
@@ -263,11 +439,21 @@ func TestValidateDestinationSettings(t *testing.T) {
 			wantErr:                 false,
 		},
 		{
+			name: "normal service allowed with hostname",
+			ds: &ir.DestinationSetting{
+				Name:      "normal with hostname",
+				Endpoints: []*ir.DestinationEndpoint{{Hostname: &hostname, Host: "10.0.0.1"}},
+			},
+			endpointRoutingDisabled: true,
+			kind:                    &svcKind,
+			wantErr:                 false,
+		},
+		{
 			name: "mixed address type rejected when EndpointSlice routing",
 			ds: &ir.DestinationSetting{
 				Name:        "mixed",
 				Endpoints:   []*ir.DestinationEndpoint{{Host: "10.0.0.1"}},
-				AddressType: ptr.To(ir.MIXED),
+				AddressType: new(ir.MIXED),
 			},
 			endpointRoutingDisabled: false,
 			kind:                    &svcKind,
@@ -289,37 +475,60 @@ func TestValidateDestinationSettings(t *testing.T) {
 	}
 }
 
-func TestIsHeadlessService(t *testing.T) {
+func TestIsServiceHeadless(t *testing.T) {
 	tests := []struct {
-		name      string
-		endpoints []*ir.DestinationEndpoint
-		want      bool
+		name    string
+		service *corev1.Service
+		want    bool
 	}{
 		{
-			name: "headless Service",
-			endpoints: []*ir.DestinationEndpoint{
-				{Host: "None"},
+			name: "headless service with ClusterIP None",
+			service: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+				},
 			},
 			want: true,
 		},
 		{
-			name: "non headless Service with valid ClusterIP",
-			endpoints: []*ir.DestinationEndpoint{
-				{Host: "10.0.0.1"},
+			name: "normal service with ClusterIP",
+			service: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "10.0.0.1",
+				},
 			},
 			want: false,
 		},
 		{
-			name:      "empty slice",
-			endpoints: nil,
-			want:      false,
+			name: "dual-stack headless service",
+			service: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					ClusterIP:  "None",
+					ClusterIPs: []string{"None", "None"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "dual-stack service with valid IPs",
+			service: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					ClusterIP:  "10.0.0.1",
+					ClusterIPs: []string{"10.0.0.1", "2001:db8::1"},
+				},
+			},
+			want: false,
+		},
+		{
+			name:    "nil service",
+			service: nil,
+			want:    false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ds := &ir.DestinationSetting{Endpoints: tt.endpoints}
-			got := isHeadlessService(ds)
+			got := isServiceHeadless(tt.service)
 			require.Equal(t, tt.want, got)
 		})
 	}

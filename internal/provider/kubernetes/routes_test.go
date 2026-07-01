@@ -14,14 +14,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gwapischeme "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned/scheme"
+	mcsapiv1a1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/envoygateway"
@@ -30,6 +35,21 @@ import (
 	"github.com/envoyproxy/gateway/internal/logging"
 	"github.com/envoyproxy/gateway/internal/utils"
 )
+
+// newTestScheme returns a scheme seeded with common types and any additional unstructured GVKs provided.
+func newTestScheme(unstructuredGVKs ...schema.GroupVersionKind) *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(egv1a1.AddToScheme(scheme))
+	utilruntime.Must(gwapischeme.AddToScheme(scheme))
+	utilruntime.Must(mcsapiv1a1.AddToScheme(scheme))
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
+	for _, gvk := range unstructuredGVKs {
+		scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
+		scheme.AddKnownTypeWithName(gvk.GroupVersion().WithKind(gvk.Kind+"List"), &unstructured.UnstructuredList{})
+	}
+	return scheme
+}
 
 func TestProcessHTTPRoutes(t *testing.T) {
 	const (
@@ -60,7 +80,7 @@ func TestProcessHTTPRoutes(t *testing.T) {
 				{
 					Name:     "http",
 					Protocol: gwapiv1.HTTPProtocolType,
-					Port:     gwapiv1.PortNumber(int32(8080)),
+					Port:     int32(8080),
 				},
 			},
 		},
@@ -100,8 +120,8 @@ func TestProcessHTTPRoutes(t *testing.T) {
 								Matches: []gwapiv1.HTTPRouteMatch{
 									{
 										Path: &gwapiv1.HTTPPathMatch{
-											Type:  ptr.To(gwapiv1.PathMatchPathPrefix),
-											Value: ptr.To("/"),
+											Type:  new(gwapiv1.PathMatchPathPrefix),
+											Value: new("/"),
 										},
 									},
 								},
@@ -144,8 +164,8 @@ func TestProcessHTTPRoutes(t *testing.T) {
 								Matches: []gwapiv1.HTTPRouteMatch{
 									{
 										Path: &gwapiv1.HTTPPathMatch{
-											Type:  ptr.To(gwapiv1.PathMatchPathPrefix),
-											Value: ptr.To("/"),
+											Type:  new(gwapiv1.PathMatchPathPrefix),
+											Value: new("/"),
 										},
 									},
 								},
@@ -240,8 +260,8 @@ func TestProcessHTTPRoutes(t *testing.T) {
 								Matches: []gwapiv1.HTTPRouteMatch{
 									{
 										Path: &gwapiv1.HTTPPathMatch{
-											Type:  ptr.To(gwapiv1.PathMatchPathPrefix),
-											Value: ptr.To("/"),
+											Type:  new(gwapiv1.PathMatchPathPrefix),
+											Value: new("/"),
 										},
 									},
 								},
@@ -313,8 +333,8 @@ func TestProcessHTTPRoutes(t *testing.T) {
 								Matches: []gwapiv1.HTTPRouteMatch{
 									{
 										Path: &gwapiv1.HTTPPathMatch{
-											Type:  ptr.To(gwapiv1.PathMatchPathPrefix),
-											Value: ptr.To("/"),
+											Type:  new(gwapiv1.PathMatchPathPrefix),
+											Value: new("/"),
 										},
 									},
 								},
@@ -361,8 +381,8 @@ func TestProcessHTTPRoutes(t *testing.T) {
 								Matches: []gwapiv1.HTTPRouteMatch{
 									{
 										Path: &gwapiv1.HTTPPathMatch{
-											Type:  ptr.To(gwapiv1.PathMatchPathPrefix),
-											Value: ptr.To("/1"),
+											Type:  new(gwapiv1.PathMatchPathPrefix),
+											Value: new("/1"),
 										},
 									},
 								},
@@ -409,8 +429,8 @@ func TestProcessHTTPRoutes(t *testing.T) {
 								Matches: []gwapiv1.HTTPRouteMatch{
 									{
 										Path: &gwapiv1.HTTPPathMatch{
-											Type:  ptr.To(gwapiv1.PathMatchPathPrefix),
-											Value: ptr.To("/2"),
+											Type:  new(gwapiv1.PathMatchPathPrefix),
+											Value: new("/2"),
 										},
 									},
 								},
@@ -487,8 +507,8 @@ func TestProcessHTTPRoutes(t *testing.T) {
 								Matches: []gwapiv1.HTTPRouteMatch{
 									{
 										Path: &gwapiv1.HTTPPathMatch{
-											Type:  ptr.To(gwapiv1.PathMatchPathPrefix),
-											Value: ptr.To("/1"),
+											Type:  new(gwapiv1.PathMatchPathPrefix),
+											Value: new("/1"),
 										},
 									},
 								},
@@ -535,8 +555,8 @@ func TestProcessHTTPRoutes(t *testing.T) {
 								Matches: []gwapiv1.HTTPRouteMatch{
 									{
 										Path: &gwapiv1.HTTPPathMatch{
-											Type:  ptr.To(gwapiv1.PathMatchPathPrefix),
-											Value: ptr.To("/2"),
+											Type:  new(gwapiv1.PathMatchPathPrefix),
+											Value: new("/2"),
 										},
 									},
 								},
@@ -691,7 +711,7 @@ func TestProcessGRPCRoutes(t *testing.T) {
 				{
 					Name:     "http",
 					Protocol: gwapiv1.HTTPProtocolType,
-					Port:     gwapiv1.PortNumber(int32(8080)),
+					Port:     int32(8080),
 				},
 			},
 		},
@@ -699,10 +719,11 @@ func TestProcessGRPCRoutes(t *testing.T) {
 	gwNsName := utils.NamespacedName(gw).String()
 
 	testCases := []struct {
-		name               string
-		routes             []*gwapiv1.GRPCRoute
-		extensionAPIGroups []schema.GroupVersionKind
-		expected           bool
+		name                  string
+		routes                []*gwapiv1.GRPCRoute
+		extensionAPIGroups    []schema.GroupVersionKind
+		gatewayToListenerSets []types.NamespacedName
+		expected              bool
 	}{
 		{
 			name: "valid grpcroute",
@@ -725,7 +746,7 @@ func TestProcessGRPCRoutes(t *testing.T) {
 								Matches: []gwapiv1.GRPCRouteMatch{
 									{
 										Method: &gwapiv1.GRPCMethodMatch{
-											Method: ptr.To("Ping"),
+											Method: new("Ping"),
 										},
 									},
 								},
@@ -746,6 +767,87 @@ func TestProcessGRPCRoutes(t *testing.T) {
 				},
 			},
 			expected: true,
+		},
+		{
+			name: "grpcroute referencing listenerset",
+			routes: []*gwapiv1.GRPCRoute{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "test",
+						Name:      "xlistener-only",
+					},
+					Spec: gwapiv1.GRPCRouteSpec{
+						CommonRouteSpec: gwapiv1.CommonRouteSpec{
+							ParentRefs: []gwapiv1.ParentReference{
+								{
+									Group:       gatewayapi.GroupPtr(gwapiv1.GroupVersion.Group),
+									Kind:        gatewayapi.KindPtr(resource.KindListenerSet),
+									Name:        "listener-set",
+									Namespace:   gatewayapi.NamespacePtr("test"),
+									SectionName: gatewayapi.SectionNamePtr("extra-grpc"),
+								},
+							},
+						},
+						Rules: []gwapiv1.GRPCRouteRule{
+							{
+								BackendRefs: []gwapiv1.GRPCBackendRef{
+									{
+										BackendRef: gwapiv1.BackendRef{
+											BackendObjectReference: gwapiv1.BackendObjectReference{
+												Name: gwapiv1.ObjectName("test"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			gatewayToListenerSets: []types.NamespacedName{{Namespace: "test", Name: "listener-set"}},
+			expected:              true,
+		},
+		{
+			name: "grpcroute referencing gateway and listenerSet",
+			routes: []*gwapiv1.GRPCRoute{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "test",
+						Name:      "multiple-parents",
+					},
+					Spec: gwapiv1.GRPCRouteSpec{
+						CommonRouteSpec: gwapiv1.CommonRouteSpec{
+							ParentRefs: []gwapiv1.ParentReference{
+								{
+									Name: "test",
+								},
+								{
+									Group:       gatewayapi.GroupPtr(gwapiv1.GroupName),
+									Kind:        gatewayapi.KindPtr(resource.KindListenerSet),
+									Name:        "listener-set",
+									Namespace:   gatewayapi.NamespacePtr("test"),
+									SectionName: gatewayapi.SectionNamePtr("extra-grpc"),
+								},
+							},
+						},
+						Rules: []gwapiv1.GRPCRouteRule{
+							{
+								BackendRefs: []gwapiv1.GRPCBackendRef{
+									{
+										BackendRef: gwapiv1.BackendRef{
+											BackendObjectReference: gwapiv1.BackendObjectReference{
+												Name: gwapiv1.ObjectName("test"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			gatewayToListenerSets: []types.NamespacedName{{Namespace: "test", Name: "listener-set"}},
+			expected:              true,
 		},
 	}
 
@@ -777,11 +879,15 @@ func TestProcessGRPCRoutes(t *testing.T) {
 				WithScheme(envoygateway.GetScheme()).
 				WithObjects(objs...).
 				WithIndex(&gwapiv1.GRPCRoute{}, gatewayGRPCRouteIndex, gatewayGRPCRouteIndexFunc).
+				WithIndex(&gwapiv1.GRPCRoute{}, listenerSetGRPCRouteIndex, listenerSetGRPCRouteIndexFunc).
 				Build()
 
 			// Process the test case httproutes.
 			resourceTree := resource.NewResources()
 			resourceMap := newResourceMapping()
+			if len(tc.gatewayToListenerSets) > 0 {
+				resourceMap.gatewayToListenerSets[gwNsName] = append(resourceMap.gatewayToListenerSets[gwNsName], tc.gatewayToListenerSets...)
+			}
 			err := r.processGRPCRoutes(ctx, gwNsName, resourceMap, resourceTree)
 			if tc.expected {
 				require.NoError(t, err)
@@ -1128,8 +1234,6 @@ func TestValidateHTTPRouteParentRefs(t *testing.T) {
 }
 
 func TestProcessHTTPRoutesWithCustomBackends(t *testing.T) {
-	ctx := context.Background()
-
 	// Create test custom backend resources
 	s3Backend := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -1191,8 +1295,8 @@ func TestProcessHTTPRoutesWithCustomBackends(t *testing.T) {
 						{
 							BackendRef: gwapiv1.BackendRef{
 								BackendObjectReference: gwapiv1.BackendObjectReference{
-									Group: ptr.To(gwapiv1.Group("storage.example.io")),
-									Kind:  ptr.To(gwapiv1.Kind("S3Backend")),
+									Group: new(gwapiv1.Group("storage.example.io")),
+									Kind:  new(gwapiv1.Kind("S3Backend")),
 									Name:  "s3-backend",
 								},
 							},
@@ -1200,8 +1304,8 @@ func TestProcessHTTPRoutesWithCustomBackends(t *testing.T) {
 						{
 							BackendRef: gwapiv1.BackendRef{
 								BackendObjectReference: gwapiv1.BackendObjectReference{
-									Group: ptr.To(gwapiv1.Group("compute.example.io")),
-									Kind:  ptr.To(gwapiv1.Kind("LambdaBackend")),
+									Group: new(gwapiv1.Group("compute.example.io")),
+									Kind:  new(gwapiv1.Kind("LambdaBackend")),
 									Name:  "lambda-backend",
 								},
 							},
@@ -1277,9 +1381,13 @@ func TestProcessHTTPRoutesWithCustomBackends(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			// Use an isolated scheme and register custom backend GVKs up front to avoid
+			// lazy registration (and concurrent mutation) inside the fake client.
+			scheme := newTestScheme(tc.extBackendGVKs...)
+
 			// Create fake client with test objects
 			fakeClient := fakeclient.NewClientBuilder().
-				WithScheme(envoygateway.GetScheme()).
+				WithScheme(scheme).
 				WithObjects(tc.objects...).
 				WithIndex(&gwapiv1.HTTPRoute{}, gatewayHTTPRouteIndex, gatewayHTTPRouteIndexFunc).
 				Build()
@@ -1297,12 +1405,12 @@ func TestProcessHTTPRoutesWithCustomBackends(t *testing.T) {
 			resourceTree.GatewayClass = gatewayClass
 
 			// Call the function under test
-			err := r.processHTTPRoutes(ctx, "default/test-gateway", resourceMap, resourceTree)
+			err := r.processHTTPRoutes(t.Context(), "default/test-gateway", resourceMap, resourceTree)
 
 			// Verify results
 			require.NoError(t, err)
 			require.Len(t, resourceMap.extensionRefFilters, tc.expectedExtFiltersCount)
-			require.Equal(t, tc.expectedBackendRefsCount, resourceMap.allAssociatedBackendRefs.Len())
+			require.Len(t, resourceMap.allAssociatedBackendRefs, tc.expectedBackendRefsCount)
 
 			// Verify that HTTPRoutes were processed
 			require.Len(t, resourceTree.HTTPRoutes, 1)

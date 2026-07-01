@@ -8,6 +8,7 @@ package translator
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	"github.com/envoyproxy/gateway/internal/ir"
 	"github.com/envoyproxy/gateway/internal/utils/proto"
@@ -47,7 +49,7 @@ func buildXdsRoute(httpRoute *ir.HTTPRoute, httpListener *ir.HTTPListener) (*rou
 	connectMatch := trafficUpgradeConnect(httpRoute.Traffic)
 	router := &routev3.Route{
 		Name:     httpRoute.Name,
-		Match:    buildXdsRouteMatch(connectMatch, httpRoute.PathMatch, httpRoute.HeaderMatches, httpRoute.QueryParamMatches),
+		Match:    buildXdsRouteMatch(connectMatch, httpRoute.PathMatch, httpRoute.HeaderMatches, httpRoute.QueryParamMatches, httpRoute.CookieMatches),
 		Metadata: buildXdsMetadata(httpRoute.Metadata),
 	}
 
@@ -57,6 +59,7 @@ func buildXdsRoute(httpRoute *ir.HTTPRoute, httpListener *ir.HTTPListener) (*rou
 	if len(httpRoute.RemoveRequestHeaders) > 0 {
 		router.RequestHeadersToRemove = httpRoute.RemoveRequestHeaders
 	}
+	router.RequestHeadersToRemove = append(router.RequestHeadersToRemove, geoIPHeadersToRemove(httpListener)...)
 
 	if len(httpRoute.AddResponseHeaders) > 0 {
 		router.ResponseHeadersToAdd = buildXdsAddedHeaders(httpRoute.AddResponseHeaders)
@@ -71,7 +74,8 @@ func buildXdsRoute(httpRoute *ir.HTTPRoute, httpListener *ir.HTTPListener) (*rou
 	case httpRoute.Redirect != nil:
 		router.Action = &routev3.Route_Redirect{Redirect: buildXdsRedirectAction(httpRoute)}
 	case httpRoute.URLRewrite != nil:
-		routeAction := buildXdsURLRewriteAction(httpRoute.Destination.Name, httpRoute.URLRewrite, httpRoute.PathMatch)
+		routeAction := buildXdsURLRewriteAction(httpRoute, httpRoute.URLRewrite, httpRoute.PathMatch)
+		routeAction.IdleTimeout = idleTimeout(httpRoute, httpListener)
 		if httpRoute.Mirrors != nil {
 			routeAction.RequestMirrorPolicies = buildXdsRequestMirrorPolicies(httpRoute.Mirrors)
 		}
@@ -82,9 +86,8 @@ func buildXdsRoute(httpRoute *ir.HTTPRoute, httpListener *ir.HTTPListener) (*rou
 
 		router.Action = &routev3.Route_Route{Route: routeAction}
 	default:
-		backendWeights := httpRoute.Destination.ToBackendWeights()
-		routeAction := buildXdsRouteAction(backendWeights, httpRoute.Destination)
-		routeAction.IdleTimeout = idleTimeout(httpRoute)
+		routeAction := buildXdsRouteAction(httpRoute)
+		routeAction.IdleTimeout = idleTimeout(httpRoute, httpListener)
 
 		if httpRoute.Mirrors != nil {
 			routeAction.RequestMirrorPolicies = buildXdsRequestMirrorPolicies(httpRoute.Mirrors)
@@ -106,6 +109,18 @@ func buildXdsRoute(httpRoute *ir.HTTPRoute, httpListener *ir.HTTPListener) (*rou
 		if rt != nil {
 			router.GetRoute().Timeout = durationpb.New(rt.Duration)
 		}
+
+		// Check if MaxStreamDuration is configured
+		if httpRoute.Traffic != nil &&
+			httpRoute.Traffic.Timeout != nil &&
+			httpRoute.Traffic.Timeout.HTTP != nil {
+			if httpRoute.Traffic.Timeout.HTTP.MaxStreamDuration != nil {
+				maxStreamDuration := &routev3.RouteAction_MaxStreamDuration{
+					MaxStreamDuration: durationpb.New(httpRoute.Traffic.Timeout.HTTP.MaxStreamDuration.Duration),
+				}
+				router.GetRoute().MaxStreamDuration = maxStreamDuration
+			}
+		}
 	}
 
 	// Retries
@@ -126,6 +141,9 @@ func buildXdsRoute(httpRoute *ir.HTTPRoute, httpListener *ir.HTTPListener) (*rou
 			return nil, err
 		}
 	}
+
+	// Metrics
+	router.StatPrefix = ptr.Deref(httpRoute.StatName, "")
 
 	// Add per route filter configs to the route, if needed.
 	if err := patchRouteWithPerRouteConfig(router, httpRoute, httpListener); err != nil {
@@ -150,7 +168,18 @@ func trafficUpgradeConnect(trafficFeatures *ir.TrafficFeatures) bool {
 }
 
 func buildUpgradeConfig(trafficFeatures *ir.TrafficFeatures) []*routev3.RouteAction_UpgradeConfig {
-	if trafficFeatures == nil || trafficFeatures.HTTPUpgrade == nil {
+	if trafficFeatures == nil {
+		return defaultUpgradeConfig
+	}
+
+	if len(trafficFeatures.HTTPUpgrade) == 0 {
+		// If requestBuffer is configured, return nil to disable HTTP upgrades.
+		// Buffering is not compatible with upgrades because the buffer filter waits
+		// for the entire request body before processing, which can cause the client
+		// to time out.
+		if trafficFeatures.RequestBuffer != nil {
+			return nil
+		}
 		return defaultUpgradeConfig
 	}
 
@@ -168,7 +197,7 @@ func buildUpgradeConfig(trafficFeatures *ir.TrafficFeatures) []*routev3.RouteAct
 	return upgradeConfigs
 }
 
-func buildXdsRouteMatch(connectMatch bool, pathMatch *ir.StringMatch, headerMatches, queryParamMatches []*ir.StringMatch) *routev3.RouteMatch {
+func buildXdsRouteMatch(connectMatch bool, pathMatch *ir.StringMatch, headerMatches, queryParamMatches, cookieMatches []*ir.StringMatch) *routev3.RouteMatch {
 	var outMatch *routev3.RouteMatch
 	if connectMatch {
 		outMatch = &routev3.RouteMatch{
@@ -204,6 +233,17 @@ func buildXdsRouteMatch(connectMatch bool, pathMatch *ir.StringMatch, headerMatc
 			},
 		}
 		outMatch.QueryParameters = append(outMatch.QueryParameters, queryParamMatcher)
+	}
+
+	for _, cookieMatch := range cookieMatches {
+		stringMatcher := buildXdsStringMatcher(cookieMatch)
+
+		cookieMatcher := &routev3.CookieMatcher{
+			Name:        cookieMatch.Name,
+			StringMatch: stringMatcher,
+			InvertMatch: ptr.Deref(cookieMatch.Invert, false),
+		}
+		outMatch.Cookies = append(outMatch.Cookies, cookieMatcher)
 	}
 
 	return outMatch
@@ -284,10 +324,10 @@ func buildXdsStringMatcher(irMatch *ir.StringMatch) *matcherv3.StringMatcher {
 	return stringMatcher
 }
 
-func buildXdsRouteAction(backendWeights *ir.BackendWeights, dest *ir.RouteDestination) *routev3.RouteAction {
-	// only use weighted cluster when there are invalid weights
-	if dest.NeedsClusterPerSetting() || backendWeights.Invalid != 0 {
-		return buildXdsWeightedRouteAction(backendWeights, dest.Settings)
+func buildXdsRouteAction(route *ir.HTTPRoute) *routev3.RouteAction {
+	backendWeights := route.Destination.ToBackendWeights()
+	if route.NeedsClusterPerSetting() {
+		return buildXdsWeightedRouteAction(backendWeights, route.Destination.Settings)
 	}
 
 	return &routev3.RouteAction{
@@ -299,10 +339,10 @@ func buildXdsRouteAction(backendWeights *ir.BackendWeights, dest *ir.RouteDestin
 
 func buildXdsWeightedRouteAction(backendWeights *ir.BackendWeights, settings []*ir.DestinationSetting) *routev3.RouteAction {
 	weightedClusters := make([]*routev3.WeightedCluster_ClusterWeight, 0, len(settings))
-	if backendWeights.Invalid > 0 {
+	if backendWeights.UnavailableWeight() > 0 {
 		invalidCluster := &routev3.WeightedCluster_ClusterWeight{
 			Name:   "invalid-backend-cluster",
-			Weight: &wrapperspb.UInt32Value{Value: backendWeights.Invalid},
+			Weight: &wrapperspb.UInt32Value{Value: backendWeights.UnavailableWeight()},
 		}
 		weightedClusters = append(weightedClusters, invalidCluster)
 	}
@@ -330,15 +370,32 @@ func buildXdsWeightedRouteAction(backendWeights *ir.BackendWeights, settings []*
 				if len(destinationSetting.Filters.RemoveResponseHeaders) > 0 {
 					validCluster.ResponseHeadersToRemove = append(validCluster.ResponseHeadersToRemove, destinationSetting.Filters.RemoveResponseHeaders...)
 				}
+
+				if destinationSetting.Filters.URLRewrite != nil &&
+					destinationSetting.Filters.URLRewrite.Host != nil &&
+					destinationSetting.Filters.URLRewrite.Host.Name != nil {
+					validCluster.HostRewriteSpecifier = &routev3.WeightedCluster_ClusterWeight_HostRewriteLiteral{
+						HostRewriteLiteral: *destinationSetting.Filters.URLRewrite.Host.Name,
+					}
+				}
 			}
 
 			weightedClusters = append(weightedClusters, validCluster)
 		}
 	}
 
+	// According to the Gateway API:
+	// 500 status code should be returned for invalid HTTPBackendRef
+	// 503 status code should be returned for Services without ready endpoints
+	// Reference: https://gateway-api.sigs.k8s.io/reference/api-spec/main/spec/#httprouterule
+	clusterNotFoundResponseCode := routev3.RouteAction_INTERNAL_SERVER_ERROR
+	// Envoy can't handle mixed 500 and 503 responses, so we use 503 when both invalid and empty
+	if backendWeights.NoEndpoints > 0 {
+		clusterNotFoundResponseCode = routev3.RouteAction_SERVICE_UNAVAILABLE
+	}
 	return &routev3.RouteAction{
-		// Intentionally route to a non-existent cluster and return a 500 error when it is not found
-		ClusterNotFoundResponseCode: routev3.RouteAction_INTERNAL_SERVER_ERROR,
+		// Intentionally route to a non-existent cluster and return a 503 error when it is not found
+		ClusterNotFoundResponseCode: clusterNotFoundResponseCode,
 		ClusterSpecifier: &routev3.RouteAction_WeightedClusters{
 			WeightedClusters: &routev3.WeightedCluster{
 				Clusters: weightedClusters,
@@ -363,21 +420,39 @@ func getEffectiveRequestTimeout(httpRoute *ir.HTTPRoute) *metav1.Duration {
 	return nil
 }
 
-func idleTimeout(httpRoute *ir.HTTPRoute) *durationpb.Duration {
-	rt := getEffectiveRequestTimeout(httpRoute)
-	timeout := time.Hour // Default to 1 hour
-	if rt != nil {
-		// Ensure is not less than the request timeout
-		if timeout < rt.Duration {
-			timeout = rt.Duration
-		}
+func idleTimeout(httpRoute *ir.HTTPRoute, httpListener *ir.HTTPListener) *durationpb.Duration {
+	// When a user-configured stream idle timeout exists at the route level (Configured via BackendTrafficPolicy), use it
+	if httpRoute != nil &&
+		httpRoute.Traffic != nil &&
+		httpRoute.Traffic.Timeout != nil &&
+		httpRoute.Traffic.Timeout.HTTP != nil &&
+		httpRoute.Traffic.Timeout.HTTP.StreamIdleTimeout != nil {
+		return durationpb.New(httpRoute.Traffic.Timeout.HTTP.StreamIdleTimeout.Duration)
+	}
 
+	// When a user-configured stream idle timeout exists at the listener level (Configured via ClientTrafficPolicy),
+	// don't override it at the route level with the HTTPRoute's request timeout.
+	if httpListener != nil &&
+		httpListener.Timeout != nil &&
+		httpListener.Timeout.HTTP != nil &&
+		httpListener.Timeout.HTTP.StreamIdleTimeout != nil {
+		return nil
+	}
+
+	// Fallback to the HTTPRoute's request timeout when no user-configured stream idle timeout exists at both the route
+	// and listener levels. This is to avoid stream timeout before request timeout.
+	requestTimeout := getEffectiveRequestTimeout(httpRoute)
+	idleTimeout := time.Hour // Default to 1 hour
+	if requestTimeout != nil {
+		// Ensure the idle timeout is not less than the request timeout
+		if idleTimeout < requestTimeout.Duration {
+			idleTimeout = requestTimeout.Duration
+		}
 		// Disable idle timeout when request timeout is disabled
-		if rt.Duration == 0 {
-			timeout = 0
+		if requestTimeout.Duration == 0 {
+			idleTimeout = 0
 		}
-
-		return durationpb.New(timeout)
+		return durationpb.New(idleTimeout)
 	}
 	return nil
 }
@@ -419,9 +494,18 @@ func buildXdsRedirectAction(httpRoute *ir.HTTPRoute) *routev3.RedirectAction {
 		routeAction.PortRedirect = *redirection.Port
 	}
 	if redirection.StatusCode != nil {
-		if *redirection.StatusCode == 302 {
+		switch *redirection.StatusCode {
+		case 302:
 			routeAction.ResponseCode = routev3.RedirectAction_FOUND
-		} // no need to check for 301 since Envoy will use 301 as the default if the field is not configured
+		case 303:
+			routeAction.ResponseCode = routev3.RedirectAction_SEE_OTHER
+		case 307:
+			routeAction.ResponseCode = routev3.RedirectAction_TEMPORARY_REDIRECT
+		case 308:
+			routeAction.ResponseCode = routev3.RedirectAction_PERMANENT_REDIRECT
+		default:
+			// Envoy will use 301 as the default if the field is not configured
+		}
 	}
 
 	return routeAction
@@ -439,17 +523,26 @@ func useRegexRewriteForPrefixMatchReplace(pathMatch *ir.StringMatch, prefixMatch
 func prefix2RegexRewrite(prefix string) *matcherv3.RegexMatchAndSubstitute {
 	return &matcherv3.RegexMatchAndSubstitute{
 		Pattern: &matcherv3.RegexMatcher{
-			Regex: "^" + prefix + `\/*`,
+			// Escape prefix for regex metacharacters
+			// https://github.com/envoyproxy/gateway/issues/6857
+			Regex: "^" + regexp.QuoteMeta(prefix) + `\/*`,
 		},
 		Substitution: "/",
 	}
 }
 
-func buildXdsURLRewriteAction(destName string, urlRewrite *ir.URLRewrite, pathMatch *ir.StringMatch) *routev3.RouteAction {
-	routeAction := &routev3.RouteAction{
-		ClusterSpecifier: &routev3.RouteAction_Cluster{
-			Cluster: destName,
-		},
+func buildXdsURLRewriteAction(route *ir.HTTPRoute, urlRewrite *ir.URLRewrite, pathMatch *ir.StringMatch) *routev3.RouteAction {
+	backendWeights := route.Destination.ToBackendWeights()
+	// only use weighted cluster when there are invalid weights
+	var routeAction *routev3.RouteAction
+	if route.NeedsClusterPerSetting() {
+		routeAction = buildXdsWeightedRouteAction(backendWeights, route.Destination.Settings)
+	} else {
+		routeAction = &routev3.RouteAction{
+			ClusterSpecifier: &routev3.RouteAction_Cluster{
+				Cluster: backendWeights.Name,
+			},
+		}
 	}
 
 	if urlRewrite.Path != nil {
@@ -485,7 +578,6 @@ func buildXdsURLRewriteAction(destName string, urlRewrite *ir.URLRewrite, pathMa
 	}
 
 	if urlRewrite.Host != nil {
-
 		switch {
 		case urlRewrite.Host.Name != nil:
 			routeAction.HostRewriteSpecifier = &routev3.RouteAction_HostRewriteLiteral{
@@ -495,13 +587,16 @@ func buildXdsURLRewriteAction(destName string, urlRewrite *ir.URLRewrite, pathMa
 			routeAction.HostRewriteSpecifier = &routev3.RouteAction_HostRewriteHeader{
 				HostRewriteHeader: *urlRewrite.Host.Header,
 			}
-		case urlRewrite.Host.Backend != nil:
+		case urlRewrite.Host.Backend != nil && !route.IsDynamicResolverRoute():
+			// Auto Host rewrite is only supported for non-dynamic resolver routes.
 			routeAction.HostRewriteSpecifier = &routev3.RouteAction_AutoHostRewrite{
 				AutoHostRewrite: wrapperspb.Bool(true),
 			}
 		}
 
-		routeAction.AppendXForwardedHost = true
+		if urlRewrite.AppendXForwardedHost == nil || *urlRewrite.AppendXForwardedHost {
+			routeAction.AppendXForwardedHost = true
+		}
 	}
 
 	return routeAction
@@ -513,10 +608,14 @@ func buildXdsDirectResponseAction(res *ir.CustomResponse) *routev3.DirectRespons
 		routeAction.Status = *res.StatusCode
 	}
 
-	if res.Body != nil && *res.Body != "" {
-		routeAction.Body = &corev3.DataSource{
-			Specifier: &corev3.DataSource_InlineString{
-				InlineString: *res.Body,
+	if len(res.Body) > 0 {
+		routeAction.BodyFormat = &corev3.SubstitutionFormatString{
+			Format: &corev3.SubstitutionFormatString_TextFormatSource{
+				TextFormatSource: &corev3.DataSource{
+					Specifier: &corev3.DataSource_InlineBytes{
+						InlineBytes: res.Body,
+					},
+				},
 			},
 		}
 	}
@@ -532,6 +631,8 @@ func buildXdsRequestMirrorPolicies(mirrorPolicies []*ir.MirrorPolicy) []*routev3
 			xdsMirrorPolicies = append(xdsMirrorPolicies, &routev3.RouteAction_RequestMirrorPolicy{
 				Cluster:         policy.Destination.Name,
 				RuntimeFraction: mp,
+				// We don't need to append the shadow host suffix as the mirror policy already uses a different cluster which is enough to distinguish the mirrored traffic
+				DisableShadowHostSuffixAppend: true,
 			})
 		}
 	}
@@ -564,9 +665,12 @@ func buildXdsAddedHeaders(headersToAdd []ir.AddHeader) []*corev3.HeaderValueOpti
 	for _, header := range headersToAdd {
 		var appendAction corev3.HeaderValueOption_HeaderAppendAction
 
-		if header.Append {
+		switch {
+		case header.AddIfAbsent:
+			appendAction = corev3.HeaderValueOption_ADD_IF_ABSENT
+		case header.Append:
 			appendAction = corev3.HeaderValueOption_APPEND_IF_EXISTS_OR_ADD
-		} else {
+		default:
 			appendAction = corev3.HeaderValueOption_OVERWRITE_IF_EXISTS_OR_ADD
 		}
 		// Allow empty headers to be set, but don't add the config to do so unless necessary
@@ -607,15 +711,19 @@ func buildHashPolicy(httpRoute *ir.HTTPRoute) []*routev3.RouteAction_HashPolicy 
 	ch := httpRoute.Traffic.LoadBalancer.ConsistentHash
 
 	switch {
-	case ch.Header != nil:
-		hashPolicy := &routev3.RouteAction_HashPolicy{
-			PolicySpecifier: &routev3.RouteAction_HashPolicy_Header_{
-				Header: &routev3.RouteAction_HashPolicy_Header{
-					HeaderName: ch.Header.Name,
+	case ch.Headers != nil:
+		hps := make([]*routev3.RouteAction_HashPolicy, 0, len(ch.Headers))
+		for _, h := range ch.Headers {
+			hp := &routev3.RouteAction_HashPolicy{
+				PolicySpecifier: &routev3.RouteAction_HashPolicy_Header_{
+					Header: &routev3.RouteAction_HashPolicy_Header{
+						HeaderName: h.Name,
+					},
 				},
-			},
+			}
+			hps = append(hps, hp)
 		}
-		return []*routev3.RouteAction_HashPolicy{hashPolicy}
+		return hps
 	case ch.Cookie != nil:
 		hashPolicy := &routev3.RouteAction_HashPolicy{
 			PolicySpecifier: &routev3.RouteAction_HashPolicy_Cookie_{
@@ -625,7 +733,11 @@ func buildHashPolicy(httpRoute *ir.HTTPRoute) []*routev3.RouteAction_HashPolicy 
 			},
 		}
 		if ch.Cookie.TTL != nil {
-			hashPolicy.GetCookie().Ttl = durationpb.New(ch.Cookie.TTL.Duration)
+			d, err := time.ParseDuration(string(*ch.Cookie.TTL))
+			if err != nil {
+				return nil
+			}
+			hashPolicy.GetCookie().Ttl = durationpb.New(d)
 		}
 		if ch.Cookie.Attributes != nil {
 			attributes := make([]*routev3.RouteAction_HashPolicy_CookieAttribute, 0, len(ch.Cookie.Attributes))
@@ -650,6 +762,22 @@ func buildHashPolicy(httpRoute *ir.HTTPRoute) []*routev3.RouteAction_HashPolicy 
 			},
 		}
 		return []*routev3.RouteAction_HashPolicy{hashPolicy}
+	case ch.QueryParams != nil:
+		hps := make([]*routev3.RouteAction_HashPolicy, 0, len(ch.QueryParams))
+		for _, q := range ch.QueryParams {
+			if q == nil {
+				continue
+			}
+			hp := &routev3.RouteAction_HashPolicy{
+				PolicySpecifier: &routev3.RouteAction_HashPolicy_QueryParameter_{
+					QueryParameter: &routev3.RouteAction_HashPolicy_QueryParameter{
+						Name: q.Name,
+					},
+				},
+			}
+			hps = append(hps, hp)
+		}
+		return hps
 	default:
 		return nil
 	}
@@ -741,14 +869,18 @@ func buildRouteTracing(httpRoute *ir.HTTPRoute) (*routev3.Tracing, error) {
 	}
 
 	tracing := httpRoute.Traffic.Telemetry.Tracing
-	tags, err := buildTracingTags(tracing.CustomTags)
+	tags, err := buildTracingTags(tracing.CustomTags, tracing.Tags)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build route tracing tags:%w", err)
 	}
 
+	op, upstreamOp := buildTracingOperation(tracing.SpanName)
+
 	return &routev3.Tracing{
-		RandomSampling: fractionalpercent.FromFraction(tracing.SamplingFraction),
-		CustomTags:     tags,
+		RandomSampling:    fractionalpercent.FromFraction(tracing.SamplingFraction),
+		CustomTags:        tags,
+		Operation:         op,
+		UpstreamOperation: upstreamOp,
 	}, nil
 }
 
@@ -771,6 +903,7 @@ func buildRetryOn(triggers []ir.TriggerEnum) (string, error) {
 		ir.Error5XX:             "5xx",
 		ir.GatewayError:         "gateway-error",
 		ir.Reset:                "reset",
+		ir.ResetBeforeRequest:   "reset-before-request",
 		ir.ConnectFailure:       "connect-failure",
 		ir.Retriable4XX:         "retriable-4xx",
 		ir.RefusedStream:        "refused-stream",

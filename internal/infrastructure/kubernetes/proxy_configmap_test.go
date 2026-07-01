@@ -10,13 +10,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -28,6 +24,8 @@ import (
 	"github.com/envoyproxy/gateway/internal/infrastructure/common"
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/proxy"
 	"github.com/envoyproxy/gateway/internal/ir"
+	"github.com/envoyproxy/gateway/internal/message"
+	testutil "github.com/envoyproxy/gateway/internal/utils/test"
 )
 
 func TestCreateOrUpdateProxyConfigMap(t *testing.T) {
@@ -195,8 +193,9 @@ func TestCreateOrUpdateProxyConfigMap(t *testing.T) {
 					},
 				},
 				Data: map[string]string{
-					common.SdsCAFilename:   common.GetSdsCAConfigMapData(proxy.XdsTLSCaFilepath),
-					common.SdsCertFilename: common.GetSdsCertConfigMapData(proxy.XdsTLSCertFilepath, proxy.XdsTLSKeyFilepath),
+					common.SdsCAFilename:                  common.GetSdsCAConfigMapData(proxy.XdsTLSCaFilepath),
+					common.SdsCertFilename:                common.GetSdsCertConfigMapData(proxy.XdsTLSCertFilepath, proxy.XdsTLSKeyFilepath),
+					common.SdsServiceAccountTokenFilename: common.GetSdsServiceAccountTokenConfigMapData(proxy.XdsServiceAccountTokenFilepath),
 				},
 			},
 		},
@@ -205,7 +204,7 @@ func TestCreateOrUpdateProxyConfigMap(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			cfg, err := config.New(os.Stdout)
+			cfg, err := config.New(os.Stdout, os.Stderr)
 			require.NoError(t, err)
 			cfg.ControllerNamespace = tc.ns
 
@@ -222,11 +221,12 @@ func TestCreateOrUpdateProxyConfigMap(t *testing.T) {
 					WithInterceptorFuncs(interceptorFunc).
 					Build()
 			}
-			kube := NewInfra(cli, cfg)
+			errorNotifier := message.RunnerErrorNotifier{RunnerName: t.Name(), RunnerErrors: &message.RunnerErrors{}}
+			kube := NewInfra(cli, cfg, errorNotifier)
 			require.NoError(t, setupOwnerReferenceResources(ctx, kube.Client))
 			if tc.gatewayNamespaceMode {
 				kube.EnvoyGateway.Provider.Kubernetes.Deploy = &egv1a1.KubernetesDeployMode{
-					Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+					Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 				}
 			}
 
@@ -242,14 +242,13 @@ func TestCreateOrUpdateProxyConfigMap(t *testing.T) {
 			}
 			require.NoError(t, kube.Client.Get(ctx, client.ObjectKeyFromObject(actual), actual))
 
-			opts := cmpopts.IgnoreFields(metav1.ObjectMeta{}, "ResourceVersion")
-			assert.True(t, cmp.Equal(tc.expect, actual, opts))
+			testutil.CmpResources(t, tc.expect, actual)
 		})
 	}
 }
 
 func TestDeleteConfigProxyMap(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	infra := ir.NewInfra()
@@ -286,7 +285,8 @@ func TestDeleteConfigProxyMap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			cli := fakeclient.NewClientBuilder().WithScheme(envoygateway.GetScheme()).WithObjects(tc.current).Build()
-			kube := NewInfra(cli, cfg)
+			errorNotifier := message.RunnerErrorNotifier{RunnerName: t.Name(), RunnerErrors: &message.RunnerErrors{}}
+			kube := NewInfra(cli, cfg, errorNotifier)
 			require.NoError(t, setupOwnerReferenceResources(ctx, kube.Client))
 
 			infra.Proxy.GetProxyMetadata().Labels[gatewayapi.OwningGatewayNamespaceLabel] = "default"

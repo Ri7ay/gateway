@@ -52,11 +52,11 @@ const LatencyTab = ({ latencyPercentileComparison, benchmarkResults }: LatencyTa
       if (maxScaleData && maxScaleData.latency && maxScaleData.latency.percentiles) {
         const percentiles = maxScaleData.latency.percentiles;
         return [
-          { percentile: 'P50', value: Number((percentiles.p50 / 1000).toFixed(1)), category: 'Median', status: 'excellent' },
-          { percentile: 'P75', value: Number((percentiles.p75 / 1000).toFixed(1)), category: '75th', status: 'excellent' },
-          { percentile: 'P90', value: Number((percentiles.p90 / 1000).toFixed(1)), category: '90th', status: 'good' },
-          { percentile: 'P95', value: Number((percentiles.p95 / 1000).toFixed(1)), category: '95th', status: 'watch' },
-          { percentile: 'P99', value: Number((percentiles.p99 / 1000).toFixed(1)), category: '99th', status: 'alert' }
+          { percentile: 'P50', value: Number(percentiles.p50.toFixed(1)), category: 'Median', status: 'excellent' },
+          { percentile: 'P75', value: Number(percentiles.p75.toFixed(1)), category: '75th', status: 'excellent' },
+          { percentile: 'P90', value: Number(percentiles.p90.toFixed(1)), category: '90th', status: 'good' },
+          { percentile: 'P95', value: Number(percentiles.p95.toFixed(1)), category: '95th', status: 'watch' },
+          { percentile: 'P99', value: Number(percentiles.p99.toFixed(1)), category: '99th', status: 'alert' }
         ];
       }
     }
@@ -72,8 +72,8 @@ const LatencyTab = ({ latencyPercentileComparison, benchmarkResults }: LatencyTa
     .filter(item => item.phase === 'scaling-up')
     .map(item => ({
       routes: item.routes,
-      mean: Number((item.latency.mean / 1000).toFixed(1)),
-      p95: Number((item.latency.percentiles.p95 / 1000).toFixed(1)),
+      mean: Number(item.latency.mean.toFixed(1)),
+      p95: Number(item.latency.percentiles.p95.toFixed(1)),
       ratio: Number((item.latency.percentiles.p95 / item.latency.mean).toFixed(1))
     }));
 
@@ -246,30 +246,27 @@ const LatencyTab = ({ latencyPercentileComparison, benchmarkResults }: LatencyTa
                     />
                     <Area
                       dataKey="p99"
-                      stackId="latency"
                       type="monotone"
                       fill="#4f46e5"
-                      fillOpacity={0.3}
+                      fillOpacity={0.2}
                       stroke="#4f46e5"
-                      strokeWidth={1}
+                      strokeWidth={2}
                     />
                     <Area
                       dataKey="p95"
-                      stackId="latency"
                       type="monotone"
                       fill="#6366f1"
-                      fillOpacity={0.4}
+                      fillOpacity={0.3}
                       stroke="#6366f1"
                       strokeWidth={2}
                     />
                     <Area
                       dataKey="p50"
-                      stackId="latency"
                       type="monotone"
                       fill="#8b5cf6"
-                      fillOpacity={0.6}
+                      fillOpacity={0.4}
                       stroke="#8b5cf6"
-                      strokeWidth={3}
+                      strokeWidth={2}
                     />
                   </AreaChart>
                 </ChartContainer>

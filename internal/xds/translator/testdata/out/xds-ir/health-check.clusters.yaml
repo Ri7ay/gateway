@@ -18,14 +18,16 @@
       - end: "301"
         start: "300"
       host: '*'
+      method: POST
       path: /healthz
       receive:
       - text: 6f6b
+      send:
+        text: "70696e67"
     interval: 3s
     timeout: 0.500s
     unhealthyThreshold: 3
   ignoreHealthOnHostRemoval: true
-  lbPolicy: LEAST_REQUEST
   loadBalancingPolicy:
     policies:
     - typedExtensionConfig:
@@ -40,6 +42,7 @@
     consecutive5xx: 5
     consecutiveGatewayFailure: 0
     consecutiveLocalOriginFailure: 5
+    enforcingConsecutiveGatewayFailure: 100
     interval: 2s
     maxEjectionPercent: 100
   perConnectionBufferLimitBytes: 32768
@@ -62,14 +65,21 @@
       - end: "202"
         start: "200"
       host: '*'
+      method: POST
       path: /healthz
       receive:
       - binary: cG9uZw==
+      retriableStatuses:
+      - end: "430"
+        start: "429"
+      - end: "504"
+        start: "503"
+      send:
+        binary: cGluZw==
     interval: 5s
     timeout: 1s
     unhealthyThreshold: 3
   ignoreHealthOnHostRemoval: true
-  lbPolicy: LEAST_REQUEST
   loadBalancingPolicy:
     policies:
     - typedExtensionConfig:
@@ -84,6 +94,7 @@
     consecutive5xx: 5
     consecutiveGatewayFailure: 0
     consecutiveLocalOriginFailure: 5
+    enforcingConsecutiveGatewayFailure: 100
     interval: 1s
     maxEjectionPercent: 100
   perConnectionBufferLimitBytes: 32768
@@ -110,7 +121,6 @@
     timeout: 1s
     unhealthyThreshold: 3
   ignoreHealthOnHostRemoval: true
-  lbPolicy: LEAST_REQUEST
   loadBalancingPolicy:
     policies:
     - typedExtensionConfig:
@@ -125,6 +135,7 @@
     consecutive5xx: 5
     consecutiveGatewayFailure: 0
     consecutiveLocalOriginFailure: 5
+    enforcingConsecutiveGatewayFailure: 100
     interval: 1s
     maxEjectionPercent: 100
   perConnectionBufferLimitBytes: 32768
@@ -151,7 +162,6 @@
     timeout: 1s
     unhealthyThreshold: 3
   ignoreHealthOnHostRemoval: true
-  lbPolicy: LEAST_REQUEST
   loadBalancingPolicy:
     policies:
     - typedExtensionConfig:
@@ -166,6 +176,7 @@
     consecutive5xx: 5
     consecutiveGatewayFailure: 0
     consecutiveLocalOriginFailure: 5
+    enforcingConsecutiveGatewayFailure: 100
     interval: 1s
     maxEjectionPercent: 90
     splitExternalLocalOriginErrors: true
@@ -190,7 +201,6 @@
     timeout: 1s
     unhealthyThreshold: 3
   ignoreHealthOnHostRemoval: true
-  lbPolicy: LEAST_REQUEST
   loadBalancingPolicy:
     policies:
     - typedExtensionConfig:
@@ -202,3 +212,10 @@
   name: fifth-route-dest
   perConnectionBufferLimitBytes: 32768
   type: EDS
+  typedExtensionProtocolOptions:
+    envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+      '@type': type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+      explicitHttpConfig:
+        http2ProtocolOptions:
+          initialConnectionWindowSize: 1048576
+          initialStreamWindowSize: 65536

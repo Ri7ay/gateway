@@ -43,17 +43,14 @@ spec:
 EOF
 ```
 
-Verify that ClientTrafficPolicy is Accepted:
+Verify that the ClientTrafficPolicy was created and attached to your Gateway:
 
 ```shell
-kubectl get clienttrafficpolicies.gateway.envoyproxy.io -n default
+kubectl get clienttrafficpolicies.gateway.envoyproxy.io enable-tcp-keepalive-policy -n default -o jsonpath='{.status.ancestors[0].conditions[?(@.type=="Accepted")].message}'
 ```
 
-You should see the policy marked as accepted like this:
-
-```shell
-NAME                          STATUS     AGE
-enable-tcp-keepalive-policy   Accepted   5s
+```
+Policy has been accepted.
 ```
 
 Curl the example app through Envoy proxy once again:
@@ -115,7 +112,7 @@ You should see the output like this:
 * Connection #0 to host 172.18.255.202 left intact
 }* Found bundle for host: 0x7fb9f5204ea0 [serially]
 * Can not multiplex, even if we wanted to
-* Re-using existing connection #0 with host 172.18.255.202
+* Reusing existing connection #0 with host 172.18.255.202
 > GET /headers HTTP/1.1
 > Host: www.example.com
 > User-Agent: curl/8.1.2
@@ -169,7 +166,7 @@ You can see keepalive connection marked by the output in:
 
 ```shell
 * Connection #0 to host 172.18.255.202 left intact
-* Re-using existing connection #0 with host 172.18.255.202
+* Reusing existing connection #0 with host 172.18.255.202
 ```
 
 ### Enable Proxy Protocol for downstream client
@@ -193,17 +190,14 @@ spec:
 EOF
 ```
 
-Verify that ClientTrafficPolicy is Accepted:
+Verify that the ClientTrafficPolicy was created and attached to your Gateway:
 
 ```shell
-kubectl get clienttrafficpolicies.gateway.envoyproxy.io -n default
+kubectl get clienttrafficpolicies.gateway.envoyproxy.io enable-proxy-protocol-policy -n default -o jsonpath='{.status.ancestors[0].conditions[?(@.type=="Accepted")].message}'
 ```
 
-You should see the policy marked as accepted like this:
-
-```shell
-NAME                          STATUS     AGE
-enable-proxy-protocol-policy   Accepted   5s
+```
+Policy has been accepted.
 ```
 
 Try the endpoint without using PROXY protocol with curl:
@@ -308,17 +302,14 @@ spec:
 EOF
 ```
 
-Verify that ClientTrafficPolicy is Accepted:
+Verify that the ClientTrafficPolicy was created and attached to your Gateway:
 
 ```shell
-kubectl get clienttrafficpolicies.gateway.envoyproxy.io -n default
+kubectl get clienttrafficpolicies.gateway.envoyproxy.io http-client-ip-detection -n default -o jsonpath='{.status.ancestors[0].conditions[?(@.type=="Accepted")].message}'
 ```
 
-You should see the policy marked as accepted like this:
-
-```shell
-NAME                          STATUS     AGE
-http-client-ip-detection   Accepted   5s
+```
+Policy has been accepted.
 ```
 
 Open port-forward to the admin interface port:

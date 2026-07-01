@@ -7,6 +7,7 @@ package registry
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 	"google.golang.org/grpc/security/advancedtls"
 	"google.golang.org/grpc/test/bufconn"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 	k8scli "sigs.k8s.io/controller-runtime/pkg/client"
 	k8sclicfg "sigs.k8s.io/controller-runtime/pkg/client/config"
@@ -33,6 +36,7 @@ import (
 	"github.com/envoyproxy/gateway/internal/envoygateway/config"
 	extTypes "github.com/envoyproxy/gateway/internal/extension/types"
 	"github.com/envoyproxy/gateway/internal/kubernetes"
+	"github.com/envoyproxy/gateway/internal/utils/fraction"
 	"github.com/envoyproxy/gateway/proto/extension"
 )
 
@@ -58,35 +62,88 @@ type Manager struct {
 	extensionConnCache *grpc.ClientConn
 }
 
-// NewManager returns a new Manager
-func NewManager(cfg *config.Server, inK8s bool) (extTypes.Manager, error) {
-	var cli k8scli.Client
-	var err error
-	if inK8s {
-		cli, err = k8scli.New(k8sclicfg.GetConfigOrDie(), k8scli.Options{Scheme: envoygateway.GetScheme()})
-		if err != nil {
-			return nil, err
-		}
+// newK8sClient creates a Kubernetes client if running in-cluster.
+func newK8sClient(inK8s bool) (k8scli.Client, error) {
+	if !inK8s {
+		return nil, nil
 	}
-
-	var extension *egv1a1.ExtensionManager
-	if cfg.EnvoyGateway != nil {
-		extension = cfg.EnvoyGateway.ExtensionManager
-	}
-
-	// Setup an empty default in the case that no config was provided
-	if extension == nil {
-		extension = &egv1a1.ExtensionManager{}
-	}
-
-	return &Manager{
-		k8sClient: cli,
-		namespace: cfg.ControllerNamespace,
-		extension: *extension,
-	}, nil
+	return k8scli.New(k8sclicfg.GetConfigOrDie(), k8scli.Options{Scheme: envoygateway.GetScheme()})
 }
 
-func NewInMemoryManager(cfg egv1a1.ExtensionManager, server extension.EnvoyGatewayExtensionServer) (extTypes.Manager, func(), error) {
+// NewManager creates a Manager (or CompositeManager) from the server configuration.
+// It uses GetExtensionManagers() to normalize the singular/plural extension manager fields.
+//   - 0 extensions → returns a Manager with empty config (no-op)
+//   - 1 extension → returns a plain Manager
+//   - 2+ extensions → creates individual Managers per extension, wraps in CompositeManager
+func NewManager(cfg *config.Server, inK8s bool) (extTypes.Manager, error) {
+	cli, err := newK8sClient(inK8s)
+	if err != nil {
+		return nil, err
+	}
+
+	extensions := cfg.EnvoyGateway.GetExtensionManagers()
+
+	switch len(extensions) {
+	case 0:
+		return &Manager{
+			k8sClient: cli,
+			namespace: cfg.ControllerNamespace,
+			extension: egv1a1.ExtensionManager{},
+		}, nil
+	case 1:
+		return &Manager{
+			k8sClient: cli,
+			namespace: cfg.ControllerNamespace,
+			extension: extensions[0],
+		}, nil
+	default:
+		named := make([]namedManager, 0, len(extensions))
+		for i := range extensions {
+			ext := &extensions[i]
+			mgr := &Manager{
+				k8sClient: cli,
+				namespace: cfg.ControllerNamespace,
+				extension: *ext,
+			}
+
+			resourceGKSet, policyGKSet := buildManagerGKSets(ext)
+
+			named = append(named, namedManager{
+				name:            ext.Name,
+				manager:         mgr,
+				resourceGKSet:   resourceGKSet,
+				policyGKSet:     policyGKSet,
+				cleanupHookConn: mgr.CleanupHookConns,
+			})
+		}
+
+		return NewCompositeManager(named), nil
+	}
+}
+
+// buildManagerGKSets returns (resourceGKSet, policyGKSet) for an ExtensionManager.
+// resourceGKSet covers Resources + BackendResources (used for per-extension filtering
+// in PostRouteModifyHook / PostClusterModifyHook). policyGKSet covers PolicyResources
+// (used in PostHTTPListenerModifyHook / PostTranslateModifyHook).
+// Version is intentionally dropped so matching aligns with runner.ExtensionGroupKinds
+// and Manager.HasExtension, which also compare by group+kind only.
+func buildManagerGKSets(ext *egv1a1.ExtensionManager) (sets.Set[schema.GroupKind], sets.Set[schema.GroupKind]) {
+	resourceGKSet := sets.New[schema.GroupKind]()
+	for _, gvk := range ext.Resources {
+		resourceGKSet.Insert(schema.GroupKind{Group: gvk.Group, Kind: gvk.Kind})
+	}
+	for _, gvk := range ext.BackendResources {
+		resourceGKSet.Insert(schema.GroupKind{Group: gvk.Group, Kind: gvk.Kind})
+	}
+
+	policyGKSet := sets.New[schema.GroupKind]()
+	for _, gvk := range ext.PolicyResources {
+		policyGKSet.Insert(schema.GroupKind{Group: gvk.Group, Kind: gvk.Kind})
+	}
+	return resourceGKSet, policyGKSet
+}
+
+func NewInMemoryManager(cfg *egv1a1.ExtensionManager, server extension.EnvoyGatewayExtensionServer) (extTypes.Manager, func(), error) {
 	if server == nil {
 		return nil, nil, fmt.Errorf("in-memory manager must be passed a server")
 	}
@@ -108,7 +165,7 @@ func NewInMemoryManager(cfg egv1a1.ExtensionManager, server extension.EnvoyGatew
 	}
 
 	if cfg.Service != nil {
-		opts, err := setupGRPCOpts(context.Background(), nil, &cfg, "")
+		opts, err := setupGRPCOpts(context.Background(), nil, cfg, "")
 		if err != nil {
 			return nil, nil, err
 		}
@@ -126,13 +183,23 @@ func NewInMemoryManager(cfg egv1a1.ExtensionManager, server extension.EnvoyGatew
 
 	return &Manager{
 		extensionConnCache: conn,
-		extension:          cfg,
+		extension:          *cfg,
 	}, c, nil
 }
 
 // FailOpen returns true if the extension manager is configured to fail open, and false otherwise.
 func (m *Manager) FailOpen() bool {
 	return m.extension.FailOpen
+}
+
+// GetTranslationHookConfig returns the translation hook configuration.
+func (m *Manager) GetTranslationHookConfig() *egv1a1.TranslationConfig {
+	if m.extension.Hooks == nil ||
+		m.extension.Hooks.XDSTranslator == nil ||
+		m.extension.Hooks.XDSTranslator.Translation == nil {
+		return nil
+	}
+	return m.extension.Hooks.XDSTranslator.Translation
 }
 
 // HasExtension checks to see whether a given Group and Kind has an
@@ -292,6 +359,15 @@ func setupGRPCOpts(ctx context.Context, client k8scli.Client, ext *egv1a1.Extens
 		if err != nil {
 			return nil, fmt.Errorf("failed to get root CA certificates: %w", err)
 		}
+
+		// Sanity check to ensure that the client certificate reference is valid if mTLS is configured
+		if ext.Service.TLS.ClientCertificateRef != nil {
+			_, clientCertErr := getClientCertificateFromSecret(ctx, client, ext, namespace)
+			if clientCertErr != nil {
+				return nil, fmt.Errorf("failed to get client certificate for mTLS: %w", clientCertErr)
+			}
+		}
+
 		creds, err := getGRPCCredentials(client, ext, namespace)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get gRPC TLS credentials: %w", err)
@@ -328,16 +404,25 @@ func setupGRPCOpts(ctx context.Context, client k8scli.Client, ext *egv1a1.Extens
 }
 
 func getGRPCCredentials(client k8scli.Client, ext *egv1a1.ExtensionManager, namespace string) (credentials.TransportCredentials, error) {
-	return advancedtls.NewClientCreds(&advancedtls.Options{
+	options := &advancedtls.Options{
 		RootOptions: advancedtls.RootCertificateOptions{
 			// A callback function that dynamically loads root CA certificates from secret
 			GetRootCertificates: createGetRootCertificatesHandler(client, ext, namespace),
 		},
-	})
+	}
+
+	// Add client certificate options for mTLS if configured
+	if ext.Service.TLS.ClientCertificateRef != nil {
+		options.IdentityOptions = advancedtls.IdentityCertificateOptions{
+			GetIdentityCertificatesForClient: createGetClientCertificatesHandler(client, ext, namespace),
+		}
+	}
+
+	return advancedtls.NewClientCreds(options)
 }
 
 func createGetRootCertificatesHandler(client k8scli.Client, ext *egv1a1.ExtensionManager, namespace string) func(*advancedtls.ConnectionInfo) (*advancedtls.RootCertificates, error) {
-	return func(params *advancedtls.ConnectionInfo) (*advancedtls.RootCertificates, error) {
+	return func(_ *advancedtls.ConnectionInfo) (*advancedtls.RootCertificates, error) {
 		ctx := context.Background()
 		cp, err := getCertPoolFromSecret(ctx, client, ext, namespace)
 		if err != nil {
@@ -366,16 +451,44 @@ func getCertPoolFromSecret(ctx context.Context, client k8scli.Client, ext *egv1a
 	return cp, nil
 }
 
-func fractionOrDefault(fraction *gwapiv1.Fraction, defaultValue float64) float64 {
-	if fraction != nil {
-		numerator := float64(fraction.Numerator)
-		denominator := float64(100)
-		if fraction.Denominator != nil {
-			denominator = float64(*fraction.Denominator)
+func createGetClientCertificatesHandler(client k8scli.Client, ext *egv1a1.ExtensionManager, namespace string) func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	return func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		ctx := context.Background()
+		cert, err := getClientCertificateFromSecret(ctx, client, ext, namespace)
+		if err != nil {
+			return nil, err
 		}
-		return numerator / denominator
+		return cert, nil
 	}
-	return defaultValue
+}
+
+func getClientCertificateFromSecret(ctx context.Context, client k8scli.Client, ext *egv1a1.ExtensionManager, namespace string) (*tls.Certificate, error) {
+	if ext.Service.TLS.ClientCertificateRef == nil {
+		return nil, errors.New("client certificate reference is nil")
+	}
+
+	certRef := *ext.Service.TLS.ClientCertificateRef
+	secret, _, err := kubernetes.ValidateSecretObjectReference(ctx, client, &certRef, namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to validate client certificate reference: %w", err)
+	}
+
+	certPEMBytes, ok := secret.Data[corev1.TLSCertKey]
+	if !ok {
+		return nil, fmt.Errorf("no client certificate found in Kubernetes Secret %s in namespace %s", secret.GetName(), secret.GetNamespace())
+	}
+
+	keyPEMBytes, ok := secret.Data[corev1.TLSPrivateKeyKey]
+	if !ok {
+		return nil, fmt.Errorf("no client private key found in Kubernetes Secret %s in namespace %s", secret.GetName(), secret.GetNamespace())
+	}
+
+	cert, err := tls.X509KeyPair(certPEMBytes, keyPEMBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load client certificate and key: %w", err)
+	}
+
+	return &cert, nil
 }
 
 var retryStrToCode = map[string]codes.Code{
@@ -430,7 +543,7 @@ func buildServiceConfig(ext *egv1a1.ExtensionManager) (string, error) {
 		maxAttempts = ptr.Deref(ext.Service.Retry.MaxAttempts, defaultMaxAttempts)
 		initialBackoff = ptr.Deref(ext.Service.Retry.InitialBackoff, defaultInitialBackoff)
 		maxBackoff = ptr.Deref(ext.Service.Retry.MaxBackoff, defaultMaxBackoff)
-		backoffMultiplier = fractionOrDefault(ext.Service.Retry.BackoffMultiplier, defaultBackoffMultiplier)
+		backoffMultiplier = fraction.Deref(ext.Service.Retry.BackoffMultiplier, defaultBackoffMultiplier)
 
 		if len(ext.Service.Retry.RetryableStatusCodes) > 0 {
 			var err error

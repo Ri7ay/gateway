@@ -10,12 +10,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -26,6 +23,8 @@ import (
 	"github.com/envoyproxy/gateway/internal/gatewayapi/resource"
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/proxy"
 	"github.com/envoyproxy/gateway/internal/ir"
+	"github.com/envoyproxy/gateway/internal/message"
+	testutil "github.com/envoyproxy/gateway/internal/utils/test"
 )
 
 func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
@@ -61,7 +60,7 @@ func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
 					Kind:       "ServiceAccount",
 					APIVersion: "v1",
 				},
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "envoy-test-9f86d081",
@@ -110,7 +109,7 @@ func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
 					Kind:       "ServiceAccount",
 					APIVersion: "v1",
 				},
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "envoy-test-9f86d081",
@@ -155,7 +154,7 @@ func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
 					Kind:       "ServiceAccount",
 					APIVersion: "v1",
 				},
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "very-long-name-that-will-be-hashed-and-cut-off-because-its-too-long",
@@ -172,7 +171,7 @@ func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
 					Kind:       "ServiceAccount",
 					APIVersion: "v1",
 				},
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "test",
 					Name:      "envoy-very-long-name-that-will-be-hashed-and-cut-off-b-5bacc75e",
@@ -219,7 +218,7 @@ func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
 					Kind:       "ServiceAccount",
 					APIVersion: "v1",
 				},
-				AutomountServiceAccountToken: ptr.To(false),
+				AutomountServiceAccountToken: new(false),
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "ns1",
 					Name:      "gateway-1",
@@ -247,7 +246,7 @@ func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			cfg, err := config.New(os.Stdout)
+			cfg, err := config.New(os.Stdout, os.Stderr)
 			require.NoError(t, err)
 			cfg.ControllerNamespace = tc.ns
 
@@ -265,11 +264,12 @@ func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
 					Build()
 			}
 
-			kube := NewInfra(cli, cfg)
+			errorNotifier := message.RunnerErrorNotifier{RunnerName: t.Name(), RunnerErrors: &message.RunnerErrors{}}
+			kube := NewInfra(cli, cfg, errorNotifier)
 			require.NoError(t, setupOwnerReferenceResources(ctx, kube.Client))
 			if tc.gatewayNamespaceMode {
 				kube.EnvoyGateway.Provider.Kubernetes.Deploy = &egv1a1.KubernetesDeployMode{
-					Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+					Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 				}
 			}
 
@@ -286,8 +286,7 @@ func TestCreateOrUpdateProxyServiceAccount(t *testing.T) {
 			}
 			require.NoError(t, kube.Client.Get(ctx, client.ObjectKeyFromObject(actual), actual))
 
-			opts := cmpopts.IgnoreFields(metav1.ObjectMeta{}, "ResourceVersion")
-			require.Empty(t, cmp.Diff(tc.want, actual, opts))
+			testutil.CmpResources(t, tc.want, actual)
 		})
 	}
 }

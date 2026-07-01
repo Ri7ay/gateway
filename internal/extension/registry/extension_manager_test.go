@@ -19,7 +19,9 @@ import (
 	"testing"
 
 	clusterv3 "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
-	v3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	listenerv3 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	routev3 "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	tlsv3 "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -29,15 +31,141 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/utils/ptr"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
 	"github.com/envoyproxy/gateway/internal/envoygateway"
+	"github.com/envoyproxy/gateway/internal/envoygateway/config"
+	extTypes "github.com/envoyproxy/gateway/internal/extension/types"
 	"github.com/envoyproxy/gateway/internal/ir"
 	"github.com/envoyproxy/gateway/proto/extension"
 )
+
+func TestNewManager(t *testing.T) {
+	t.Run("zero extensions returns no-op Manager", func(t *testing.T) {
+		cfg := &config.Server{
+			EnvoyGateway:        &egv1a1.EnvoyGateway{},
+			ControllerNamespace: "test-ns",
+		}
+
+		mgr, err := NewManager(cfg, false)
+		require.NoError(t, err)
+		require.NotNil(t, mgr)
+
+		// Should be a plain Manager, not a CompositeManager
+		_, isPlain := mgr.(*Manager)
+		require.True(t, isPlain, "expected *Manager for 0 extensions")
+		// No-op manager should not have extensions
+		require.False(t, mgr.HasExtension("foo.io", "Foo"))
+	})
+
+	t.Run("single extension returns plain Manager", func(t *testing.T) {
+		cfg := &config.Server{
+			EnvoyGateway: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					ExtensionManager: &egv1a1.ExtensionManager{
+						Name: "ext1",
+						Resources: []egv1a1.GroupVersionKind{
+							{Group: "foo.io", Version: "v1", Kind: "Foo"},
+						},
+						Service: &egv1a1.ExtensionService{Host: "foo.svc", Port: 8080},
+					},
+				},
+			},
+			ControllerNamespace: "test-ns",
+		}
+
+		mgr, err := NewManager(cfg, false)
+		require.NoError(t, err)
+		require.NotNil(t, mgr)
+
+		_, isPlain := mgr.(*Manager)
+		require.True(t, isPlain, "expected *Manager for 1 extension")
+		require.True(t, mgr.HasExtension("foo.io", "Foo"))
+		require.False(t, mgr.HasExtension("bar.io", "Bar"))
+	})
+
+	t.Run("multiple extensions returns CompositeManager", func(t *testing.T) {
+		cfg := &config.Server{
+			EnvoyGateway: &egv1a1.EnvoyGateway{
+				EnvoyGatewaySpec: egv1a1.EnvoyGatewaySpec{
+					ExtensionManagers: []egv1a1.ExtensionManager{
+						{
+							Name: "ext1",
+							Resources: []egv1a1.GroupVersionKind{
+								{Group: "foo.io", Version: "v1", Kind: "Foo"},
+							},
+							PolicyResources: []egv1a1.GroupVersionKind{
+								{Group: "foo.io", Version: "v1", Kind: "FooPolicy"},
+							},
+							BackendResources: []egv1a1.GroupVersionKind{
+								{Group: "foo.io", Version: "v1", Kind: "FooBackend"},
+							},
+							Service: &egv1a1.ExtensionService{Host: "foo.svc", Port: 8080},
+						},
+						{
+							Name: "ext2",
+							Resources: []egv1a1.GroupVersionKind{
+								{Group: "bar.io", Version: "v1", Kind: "Bar"},
+							},
+							PolicyResources: []egv1a1.GroupVersionKind{
+								{Group: "bar.io", Version: "v1", Kind: "BarPolicy"},
+							},
+							BackendResources: []egv1a1.GroupVersionKind{
+								{Group: "bar.io", Version: "v1", Kind: "BarBackend"},
+							},
+							Service: &egv1a1.ExtensionService{Host: "bar.svc", Port: 8080},
+						},
+					},
+				},
+			},
+			ControllerNamespace: "test-ns",
+		}
+
+		mgr, err := NewManager(cfg, false)
+		require.NoError(t, err)
+		require.NotNil(t, mgr)
+
+		composite, isComposite := mgr.(*CompositeManager)
+		require.True(t, isComposite, "expected *CompositeManager for 2+ extensions")
+		require.Len(t, composite.managers, 2)
+
+		// Union semantics: both extensions' resources are visible
+		require.True(t, mgr.HasExtension("foo.io", "Foo"))
+		require.True(t, mgr.HasExtension("foo.io", "FooBackend"))
+		require.False(t, mgr.HasExtension("foo.io", "FooPolicy"))
+		require.True(t, mgr.HasExtension("bar.io", "Bar"))
+		require.True(t, mgr.HasExtension("bar.io", "BarBackend"))
+		require.False(t, mgr.HasExtension("bar.io", "BarPolicy"))
+		require.False(t, mgr.HasExtension("baz.io", "Baz"))
+
+		// Verify named managers have the correct policyGKSets and resourceGKSets.
+		// Matching is by group+kind only; Version from ExtensionManager.Resources is dropped.
+		require.Equal(t, "ext1", composite.managers[0].name)
+		require.Len(t, composite.managers[0].policyGKSet, 1)
+		require.Contains(t, composite.managers[0].policyGKSet, schema.GroupKind{Group: "foo.io", Kind: "FooPolicy"})
+		require.Len(t, composite.managers[0].resourceGKSet, 2)
+		require.Contains(t, composite.managers[0].resourceGKSet, schema.GroupKind{Group: "foo.io", Kind: "Foo"})
+		require.Contains(t, composite.managers[0].resourceGKSet, schema.GroupKind{Group: "foo.io", Kind: "FooBackend"})
+
+		require.Equal(t, "ext2", composite.managers[1].name)
+		require.Len(t, composite.managers[1].policyGKSet, 1)
+		require.Contains(t, composite.managers[1].policyGKSet, schema.GroupKind{Group: "bar.io", Kind: "BarPolicy"})
+		require.Len(t, composite.managers[1].resourceGKSet, 2)
+		require.Contains(t, composite.managers[1].resourceGKSet, schema.GroupKind{Group: "bar.io", Kind: "Bar"})
+		require.Contains(t, composite.managers[1].resourceGKSet, schema.GroupKind{Group: "bar.io", Kind: "BarBackend"})
+	})
+}
+
+func TestNewK8sClient(t *testing.T) {
+	t.Run("not in k8s returns nil client", func(t *testing.T) {
+		cli, err := newK8sClient(false)
+		require.NoError(t, err)
+		require.Nil(t, cli)
+	})
+}
 
 func TestGetExtensionServerAddress(t *testing.T) {
 	tests := []struct {
@@ -111,7 +239,7 @@ func Test_setupGRPCOpts(t *testing.T) {
 		{
 			args: args{
 				ext: &egv1a1.ExtensionManager{
-					MaxMessageSize: ptr.To(resource.MustParse(fmt.Sprintf("%dM", math.MaxInt))),
+					MaxMessageSize: new(resource.MustParse(fmt.Sprintf("%dM", math.MaxInt))),
 					Service: &egv1a1.ExtensionService{
 						BackendEndpoint: egv1a1.BackendEndpoint{
 							FQDN: &egv1a1.FQDNEndpoint{
@@ -127,7 +255,7 @@ func Test_setupGRPCOpts(t *testing.T) {
 		{
 			args: args{
 				ext: &egv1a1.ExtensionManager{
-					MaxMessageSize: ptr.To(resource.MustParse(fmt.Sprintf("%dM", 0))),
+					MaxMessageSize: new(resource.MustParse(fmt.Sprintf("%dM", 0))),
 					Service: &egv1a1.ExtensionService{
 						BackendEndpoint: egv1a1.BackendEndpoint{
 							FQDN: &egv1a1.FQDNEndpoint{
@@ -143,7 +271,7 @@ func Test_setupGRPCOpts(t *testing.T) {
 		{
 			args: args{
 				ext: &egv1a1.ExtensionManager{
-					MaxMessageSize: ptr.To(resource.MustParse(fmt.Sprintf("%dM", 10))),
+					MaxMessageSize: new(resource.MustParse(fmt.Sprintf("%dM", 10))),
 					Service: &egv1a1.ExtensionService{
 						BackendEndpoint: egv1a1.BackendEndpoint{
 							FQDN: &egv1a1.FQDNEndpoint{
@@ -152,9 +280,9 @@ func Test_setupGRPCOpts(t *testing.T) {
 							},
 						},
 						Retry: &egv1a1.ExtensionServiceRetry{
-							MaxAttempts:    ptr.To(20),
-							InitialBackoff: ptr.To(gwapiv1.Duration("500ms")),
-							MaxBackoff:     ptr.To(gwapiv1.Duration("5s")),
+							MaxAttempts:    new(20),
+							InitialBackoff: new(gwapiv1.Duration("500ms")),
+							MaxBackoff:     new(gwapiv1.Duration("5s")),
 							BackoffMultiplier: &gwapiv1.Fraction{
 								Numerator: 50,
 							},
@@ -199,9 +327,18 @@ type testServer struct {
 	extension.UnimplementedEnvoyGatewayExtensionServer
 }
 
-func (s *testServer) PostRouteModify(ctx context.Context, req *extension.PostRouteModifyRequest) (*extension.PostRouteModifyResponse, error) {
+func (s *testServer) PostRouteModify(_ context.Context, req *extension.PostRouteModifyRequest) (*extension.PostRouteModifyResponse, error) {
 	return &extension.PostRouteModifyResponse{
 		Route: req.Route,
+	}, nil
+}
+
+func (s *testServer) PostTranslateModify(_ context.Context, req *extension.PostTranslateModifyRequest) (*extension.PostTranslateModifyResponse, error) {
+	return &extension.PostTranslateModifyResponse{
+		Clusters:  req.Clusters,
+		Secrets:   req.Secrets,
+		Listeners: req.Listeners,
+		Routes:    req.Routes,
 	}, nil
 }
 
@@ -247,7 +384,7 @@ func Test_TLS(t *testing.T) {
 			TLS: &egv1a1.ExtensionTLS{
 				CertificateRef: gwapiv1.SecretObjectReference{
 					Name:      "cert",
-					Namespace: ptr.To(gwapiv1.Namespace("default")),
+					Namespace: new(gwapiv1.Namespace("default")),
 				},
 			},
 		},
@@ -280,12 +417,125 @@ func Test_TLS(t *testing.T) {
 	require.NotNil(t, client)
 
 	response, err := client.PostRouteModify(context.Background(), &extension.PostRouteModifyRequest{
-		Route: &v3.Route{
+		Route: &routev3.Route{
 			Name: "test-route",
 		},
 	})
 	require.NoError(t, err)
 	require.Equal(t, "test-route", response.Route.Name)
+}
+
+func Test_mTLS(t *testing.T) {
+	testDir := "testdata"
+	caFile := testDir + "/ca.pem"
+	certFile := testDir + "/cert.pem"
+	keyFile := testDir + "/key.pem"
+
+	// Load server certificate
+	serverCert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	require.NoError(t, err)
+
+	// Load CA certificate for client verification
+	caCert, err := os.ReadFile(caFile)
+	require.NoError(t, err)
+	caPool := x509.NewCertPool()
+	ok := caPool.AppendCertsFromPEM(caCert)
+	require.True(t, ok)
+
+	// Load client certificate (reusing the same cert/key for simplicity)
+	clientCert, err := os.ReadFile(certFile)
+	require.NoError(t, err)
+	clientKey, err := os.ReadFile(keyFile)
+	require.NoError(t, err)
+
+	lis, err := net.Listen("tcp", "localhost:0")
+	require.NoError(t, err)
+	defer lis.Close()
+
+	port := lis.Addr().(*net.TCPAddr).Port
+
+	// Configure server to require client certificates (mTLS)
+	server := grpc.NewServer(grpc.Creds(credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caPool,
+		MinVersion:   tls.VersionTLS12,
+	})))
+	extension.RegisterEnvoyGatewayExtensionServer(server, &testServer{})
+	go func() {
+		_ = server.Serve(lis)
+		defer server.GracefulStop()
+	}()
+
+	// Configure Extension Manager with both CA cert and client cert for mTLS
+	extManager := &egv1a1.ExtensionManager{
+		Service: &egv1a1.ExtensionService{
+			BackendEndpoint: egv1a1.BackendEndpoint{
+				IP: &egv1a1.IPEndpoint{
+					Address: "localhost",
+					Port:    int32(port),
+				},
+			},
+			TLS: &egv1a1.ExtensionTLS{
+				CertificateRef: gwapiv1.SecretObjectReference{
+					Name:      "ca-cert",
+					Namespace: new(gwapiv1.Namespace("default")),
+				},
+				ClientCertificateRef: &gwapiv1.SecretObjectReference{
+					Name:      "client-cert",
+					Namespace: new(gwapiv1.Namespace("default")),
+				},
+			},
+		},
+	}
+
+	// Create secrets for both CA and client certificates
+	caSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ca-cert",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			corev1.TLSCertKey: caCert,
+		},
+	}
+
+	clientSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "client-cert",
+			Namespace: "default",
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			corev1.TLSCertKey:       clientCert,
+			corev1.TLSPrivateKeyKey: clientKey,
+		},
+	}
+
+	fakeClient := fakeclient.NewClientBuilder().WithScheme(envoygateway.GetScheme()).WithObjects(caSecret, clientSecret).Build()
+
+	opts, err := setupGRPCOpts(context.Background(), fakeClient, extManager, "test-ns")
+	require.NoError(t, err)
+	require.NotEmpty(t, opts)
+
+	conn, err := grpc.DialContext(context.Background(), fmt.Sprintf("localhost:%d", port),
+		opts...,
+	)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	client := extension.NewEnvoyGatewayExtensionClient(conn)
+	require.NotNil(t, client)
+
+	// Test that the mTLS connection works end-to-end
+	response, err := client.PostRouteModify(context.Background(), &extension.PostRouteModifyRequest{
+		Route: &routev3.Route{
+			Name: "test-mtls-route",
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "test-mtls-route", response.Route.Name)
 }
 
 func Test_buildServiceConfig(t *testing.T) {
@@ -338,9 +588,9 @@ func Test_buildServiceConfig(t *testing.T) {
 							},
 						},
 						Retry: &egv1a1.ExtensionServiceRetry{
-							MaxAttempts:    ptr.To(20),
-							InitialBackoff: ptr.To(gwapiv1.Duration("500ms")),
-							MaxBackoff:     ptr.To(gwapiv1.Duration("5s")),
+							MaxAttempts:    new(20),
+							InitialBackoff: new(gwapiv1.Duration("500ms")),
+							MaxBackoff:     new(gwapiv1.Duration("5s")),
 							BackoffMultiplier: &gwapiv1.Fraction{
 								Numerator: 50,
 							},
@@ -450,7 +700,7 @@ type retryTestServer struct {
 	mu       sync.Mutex
 }
 
-func (s *retryTestServer) PostRouteModify(ctx context.Context, req *extension.PostRouteModifyRequest) (*extension.PostRouteModifyResponse, error) {
+func (s *retryTestServer) PostRouteModify(_ context.Context, req *extension.PostRouteModifyRequest) (*extension.PostRouteModifyResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.attempts++
@@ -476,7 +726,7 @@ func Test_Integration_RetryPolicy_MaxAttempts(t *testing.T) {
 			name: "sufficient retries",
 			args: args{
 				retryPolicy: &egv1a1.ExtensionServiceRetry{
-					MaxAttempts: ptr.To(10),
+					MaxAttempts: new(10),
 					RetryableStatusCodes: []egv1a1.RetryableGRPCStatusCode{
 						"UNAVAILABLE",
 					},
@@ -488,7 +738,7 @@ func Test_Integration_RetryPolicy_MaxAttempts(t *testing.T) {
 			name: "insufficient retries",
 			args: args{
 				retryPolicy: &egv1a1.ExtensionServiceRetry{
-					MaxAttempts: ptr.To(5),
+					MaxAttempts: new(5),
 					RetryableStatusCodes: []egv1a1.RetryableGRPCStatusCode{
 						"UNAVAILABLE",
 					},
@@ -500,7 +750,7 @@ func Test_Integration_RetryPolicy_MaxAttempts(t *testing.T) {
 			name: "wrong retry code",
 			args: args{
 				retryPolicy: &egv1a1.ExtensionServiceRetry{
-					MaxAttempts: ptr.To(5),
+					MaxAttempts: new(5),
 					RetryableStatusCodes: []egv1a1.RetryableGRPCStatusCode{
 						"CANCELLED",
 					},
@@ -531,7 +781,7 @@ func Test_Integration_RetryPolicy_MaxAttempts(t *testing.T) {
 				},
 			}
 
-			mgr, _, err := NewInMemoryManager(extManager, &retryTestServer{})
+			mgr, _, err := NewInMemoryManager(&extManager, &retryTestServer{})
 			require.NoError(t, err)
 
 			hook, err := mgr.GetPostXDSHookClient(egv1a1.XDSRoute)
@@ -539,7 +789,7 @@ func Test_Integration_RetryPolicy_MaxAttempts(t *testing.T) {
 			require.NotNil(t, hook)
 
 			_, err = hook.PostRouteModifyHook(
-				&v3.Route{
+				&routev3.Route{
 					Name: "test-route",
 				}, nil, nil)
 
@@ -569,19 +819,23 @@ func getTargetRefKind(obj *unstructured.Unstructured) (string, error) {
 	return kind, nil
 }
 
-func (s *clusterUpdateTestServer) PostTranslateModify(ctx context.Context, req *extension.PostTranslateModifyRequest) (*extension.PostTranslateModifyResponse, error) {
+func (s *clusterUpdateTestServer) PostTranslateModify(_ context.Context, req *extension.PostTranslateModifyRequest) (*extension.PostTranslateModifyResponse, error) {
 	clusters := req.GetClusters()
 	if clusters == nil {
 		return &extension.PostTranslateModifyResponse{
-			Clusters: clusters,
-			Secrets:  req.GetSecrets(),
+			Clusters:  clusters,
+			Secrets:   req.GetSecrets(),
+			Listeners: req.GetListeners(),
+			Routes:    req.GetRoutes(),
 		}, errors.New("No clusters found")
 	}
 
 	if len(req.PostTranslateContext.ExtensionResources) == 0 {
 		return &extension.PostTranslateModifyResponse{
-			Clusters: clusters,
-			Secrets:  req.GetSecrets(),
+			Clusters:  clusters,
+			Secrets:   req.GetSecrets(),
+			Listeners: req.GetListeners(),
+			Routes:    req.GetRoutes(),
 		}, errors.New("No policy found")
 	}
 
@@ -589,23 +843,29 @@ func (s *clusterUpdateTestServer) PostTranslateModify(ctx context.Context, req *
 		extensionResource := unstructured.Unstructured{}
 		if err := extensionResource.UnmarshalJSON(extensionResourceBytes.UnstructuredBytes); err != nil {
 			return &extension.PostTranslateModifyResponse{
-				Clusters: clusters,
-				Secrets:  req.GetSecrets(),
+				Clusters:  clusters,
+				Secrets:   req.GetSecrets(),
+				Listeners: req.GetListeners(),
+				Routes:    req.GetRoutes(),
 			}, err
 		}
 
 		targetKind, err := getTargetRefKind(&extensionResource)
 		if err != nil || extensionResource.GetObjectKind().GroupVersionKind().Kind != "ExampleExtPolicy" || targetKind != "Gateway" {
 			return &extension.PostTranslateModifyResponse{
-				Clusters: clusters,
-				Secrets:  req.GetSecrets(),
+				Clusters:  clusters,
+				Secrets:   req.GetSecrets(),
+				Listeners: req.GetListeners(),
+				Routes:    req.GetRoutes(),
 			}, errors.New("No matching policy found")
 		}
 	}
 
 	ret := &extension.PostTranslateModifyResponse{
-		Clusters: clusters,
-		Secrets:  req.GetSecrets(),
+		Clusters:  clusters,
+		Secrets:   req.GetSecrets(),
+		Listeners: req.GetListeners(),
+		Routes:    req.GetRoutes(),
 	}
 
 	return ret, nil
@@ -705,24 +965,221 @@ func Test_Integration_ClusterUpdateExtensionServer(t *testing.T) {
 				},
 			}
 
-			mgr, _, err := NewInMemoryManager(extManager, &clusterUpdateTestServer{})
+			mgr, _, err := NewInMemoryManager(&extManager, &clusterUpdateTestServer{})
 			require.NoError(t, err)
 
 			hook, err := mgr.GetPostXDSHookClient(egv1a1.XDSTranslation)
 			require.NoError(t, err)
 			require.NotNil(t, hook)
 
-			_, _, err = hook.PostTranslateModifyHook(
+			clusters, secrets, listeners, routes, err := hook.PostTranslateModifyHook(
 				[]*clusterv3.Cluster{
 					{
 						Name: "test-cluster",
 					},
-				}, nil, tt.extensionPolicies)
+				},
+				[]*tlsv3.Secret{
+					{
+						Name: "test-secret",
+					},
+				},
+				[]*listenerv3.Listener{
+					{
+						Name: "test-listener",
+					},
+				},
+				[]*routev3.RouteConfiguration{
+					{
+						Name: "test-route",
+					},
+				},
+				tt.extensionPolicies)
+
+			// Verify that all resource types are returned when successful
+			if err == nil && !tt.errorExpected {
+				require.NotNil(t, clusters, "clusters should not be nil")
+				require.NotNil(t, secrets, "secrets should not be nil")
+				require.NotNil(t, listeners, "listeners should not be nil")
+				require.NotNil(t, routes, "routes should not be nil")
+
+				// Verify basic functionality - resources should be passed through
+				require.Len(t, clusters, 1, "should have 1 cluster")
+				require.Equal(t, "test-cluster", clusters[0].Name)
+				require.Len(t, secrets, 1, "should have 1 secret")
+				require.Equal(t, "test-secret", secrets[0].Name)
+				require.Len(t, listeners, 1, "should have 1 listener")
+				require.Equal(t, "test-listener", listeners[0].Name)
+				require.Len(t, routes, 1, "should have 1 route")
+				require.Equal(t, "test-route", routes[0].Name)
+			}
 
 			if (err != nil) != tt.errorExpected {
 				t.Errorf("PostRouteModifyHook() error = %v, errorExpected %v", err, tt.errorExpected)
 				return
 			}
+		})
+	}
+}
+
+// TestPostTranslateModifyHookWithListenersAndRoutes tests the new functionality
+// of PostTranslateModifyHook that supports listeners and routes in addition to clusters and secrets
+func TestPostTranslateModifyHookWithListenersAndRoutes(t *testing.T) {
+	extManager := egv1a1.ExtensionManager{
+		Hooks: &egv1a1.ExtensionHooks{
+			XDSTranslator: &egv1a1.XDSTranslatorHooks{
+				Post: []egv1a1.XDSTranslatorHook{
+					egv1a1.XDSTranslation,
+				},
+			},
+		},
+		Service: &egv1a1.ExtensionService{
+			BackendEndpoint: egv1a1.BackendEndpoint{
+				FQDN: &egv1a1.FQDNEndpoint{
+					Hostname: "foo.bar",
+					Port:     44344,
+				},
+			},
+		},
+	}
+
+	mgr, _, err := NewInMemoryManager(&extManager, &testServer{})
+	require.NoError(t, err)
+
+	hook, err := mgr.GetPostXDSHookClient(egv1a1.XDSTranslation)
+	require.NoError(t, err)
+	require.NotNil(t, hook)
+
+	// Test with all resource types
+	inputClusters := []*clusterv3.Cluster{
+		{Name: "cluster-1"},
+		{Name: "cluster-2"},
+	}
+	inputSecrets := []*tlsv3.Secret{
+		{Name: "secret-1"},
+		{Name: "secret-2"},
+	}
+	inputListeners := []*listenerv3.Listener{
+		{Name: "listener-1"},
+		{Name: "listener-2"},
+	}
+	inputRoutes := []*routev3.RouteConfiguration{
+		{Name: "route-1"},
+		{Name: "route-2"},
+	}
+
+	clusters, secrets, listeners, routes, err := hook.PostTranslateModifyHook(
+		inputClusters, inputSecrets, inputListeners, inputRoutes, nil)
+
+	require.NoError(t, err)
+
+	// Verify all resource types are returned
+	require.NotNil(t, clusters)
+	require.NotNil(t, secrets)
+	require.NotNil(t, listeners)
+	require.NotNil(t, routes)
+
+	// Verify the resources are passed through correctly
+	require.Len(t, clusters, 2)
+	require.Equal(t, "cluster-1", clusters[0].Name)
+	require.Equal(t, "cluster-2", clusters[1].Name)
+
+	require.Len(t, secrets, 2)
+	require.Equal(t, "secret-1", secrets[0].Name)
+	require.Equal(t, "secret-2", secrets[1].Name)
+
+	require.Len(t, listeners, 2)
+	require.Equal(t, "listener-1", listeners[0].Name)
+	require.Equal(t, "listener-2", listeners[1].Name)
+
+	require.Len(t, routes, 2)
+	require.Equal(t, "route-1", routes[0].Name)
+	require.Equal(t, "route-2", routes[1].Name)
+}
+
+// TestGetTranslationHookConfig tests the configuration option
+func TestGetTranslationHookConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   *egv1a1.ExtensionManager
+		expected *egv1a1.TranslationConfig
+	}{
+		{
+			name:     "default behavior when config is nil",
+			config:   nil,
+			expected: nil,
+		},
+		{
+			name: "default behavior when hooks is nil",
+			config: &egv1a1.ExtensionManager{
+				Hooks: nil,
+			},
+			expected: nil,
+		},
+		{
+			name: "default behavior when field is nil",
+			config: &egv1a1.ExtensionManager{
+				Hooks: &egv1a1.ExtensionHooks{
+					XDSTranslator: &egv1a1.XDSTranslatorHooks{
+						Translation: &egv1a1.TranslationConfig{},
+					},
+				},
+			},
+			expected: &egv1a1.TranslationConfig{},
+		},
+		{
+			name: "explicitly configured with listeners enabled",
+			config: &egv1a1.ExtensionManager{
+				Hooks: &egv1a1.ExtensionHooks{
+					XDSTranslator: &egv1a1.XDSTranslatorHooks{
+						Translation: &egv1a1.TranslationConfig{
+							Listener: &egv1a1.ListenerTranslationConfig{
+								IncludeAll: new(true),
+							},
+						},
+					},
+				},
+			},
+			expected: &egv1a1.TranslationConfig{
+				Listener: &egv1a1.ListenerTranslationConfig{
+					IncludeAll: new(true),
+				},
+			},
+		},
+		{
+			name: "explicitly configured with routes enabled",
+			config: &egv1a1.ExtensionManager{
+				Hooks: &egv1a1.ExtensionHooks{
+					XDSTranslator: &egv1a1.XDSTranslatorHooks{
+						Translation: &egv1a1.TranslationConfig{
+							Route: &egv1a1.RouteTranslationConfig{
+								IncludeAll: new(true),
+							},
+						},
+					},
+				},
+			},
+			expected: &egv1a1.TranslationConfig{
+				Route: &egv1a1.RouteTranslationConfig{
+					IncludeAll: new(true),
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mgr extTypes.Manager
+			var err error
+
+			if tt.config == nil {
+				defaultExt := egv1a1.ExtensionManager{}
+				mgr, _, err = NewInMemoryManager(&defaultExt, &testServer{})
+			} else {
+				mgr, _, err = NewInMemoryManager(tt.config, &testServer{})
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, tt.expected, mgr.GetTranslationHookConfig())
 		})
 	}
 }

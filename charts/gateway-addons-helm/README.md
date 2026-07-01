@@ -21,13 +21,13 @@ An Add-ons Helm chart for Envoy Gateway
 
 | Repository | Name | Version |
 |------------|------|---------|
-| https://fluent.github.io/helm-charts | fluent-bit | 0.30.4 |
-| https://grafana.github.io/helm-charts | alloy | 0.9.2 |
-| https://grafana.github.io/helm-charts | grafana | 8.0.0 |
-| https://grafana.github.io/helm-charts | loki | 4.8.0 |
+| https://fluent.github.io/helm-charts | fluent-bit | 0.56.0 |
+| https://grafana.github.io/helm-charts | alloy | 1.10.0 |
+| https://grafana.github.io/helm-charts | grafana | 10.5.15 |
+| https://grafana.github.io/helm-charts | loki | 7.0.0 |
 | https://grafana.github.io/helm-charts | tempo | 1.3.1 |
-| https://open-telemetry.github.io/opentelemetry-helm-charts | opentelemetry-collector | 0.117.3 |
-| https://prometheus-community.github.io/helm-charts | prometheus | 25.21.0 |
+| https://open-telemetry.github.io/opentelemetry-helm-charts | opentelemetry-collector | 0.159.2 |
+| https://prometheus-community.github.io/helm-charts | prometheus | 29.10.1 |
 
 ## Usage
 
@@ -84,40 +84,65 @@ helm uninstall eg-addons -n monitoring
 | grafana.dashboardProviders."dashboardproviders.yaml".providers[0].type | string | `"file"` |  |
 | grafana.dashboardsConfigMaps.envoy-gateway | string | `"grafana-dashboards"` |  |
 | grafana.datasources."datasources.yaml".apiVersion | int | `1` |  |
+| grafana.datasources."datasources.yaml".datasources[0].editable | bool | `true` |  |
 | grafana.datasources."datasources.yaml".datasources[0].name | string | `"Prometheus"` |  |
 | grafana.datasources."datasources.yaml".datasources[0].type | string | `"prometheus"` |  |
 | grafana.datasources."datasources.yaml".datasources[0].url | string | `"http://prometheus"` |  |
+| grafana.datasources."datasources.yaml".datasources[1].editable | bool | `true` |  |
+| grafana.datasources."datasources.yaml".datasources[1].name | string | `"Tempo"` |  |
+| grafana.datasources."datasources.yaml".datasources[1].type | string | `"tempo"` |  |
+| grafana.datasources."datasources.yaml".datasources[1].url | string | `"http://tempo:3100"` |  |
+| grafana.datasources."datasources.yaml".datasources[2].editable | bool | `true` |  |
+| grafana.datasources."datasources.yaml".datasources[2].name | string | `"Loki"` |  |
+| grafana.datasources."datasources.yaml".datasources[2].type | string | `"loki"` |  |
+| grafana.datasources."datasources.yaml".datasources[2].url | string | `"http://loki:3100"` |  |
 | grafana.enabled | bool | `true` |  |
+| grafana.env.GF_AUTH_ANONYMOUS_ENABLED | string | `"true"` |  |
+| grafana.env.GF_AUTH_ANONYMOUS_ORG_ROLE | string | `"Admin"` |  |
+| grafana.env.GF_AUTH_BASIC_ENABLED | string | `"false"` |  |
+| grafana.env.GF_SECURITY_ADMIN_PASSWORD | string | `"admin"` |  |
+| grafana.env.GF_SECURITY_ADMIN_USER | string | `"admin"` |  |
 | grafana.fullnameOverride | string | `"grafana"` |  |
 | grafana.service.type | string | `"LoadBalancer"` |  |
 | grafana.testFramework.enabled | bool | `false` |  |
 | loki.backend.replicas | int | `0` |  |
+| loki.chunksCache.enabled | bool | `false` |  |
 | loki.deploymentMode | string | `"SingleBinary"` |  |
 | loki.enabled | bool | `true` |  |
 | loki.fullnameOverride | string | `"loki"` |  |
 | loki.gateway.enabled | bool | `false` |  |
 | loki.loki.auth_enabled | bool | `false` |  |
+| loki.loki.commonConfig.instance_addr | string | `"${INSTANCE_ADDR}"` |  |
 | loki.loki.commonConfig.replication_factor | int | `1` |  |
+| loki.loki.commonConfig.ring.kvstore.store | string | `"memberlist"` |  |
 | loki.loki.compactorAddress | string | `"loki"` |  |
+| loki.loki.limits_config.otlp_config.resource_attributes.attributes_config[0].action | string | `"index_label"` |  |
+| loki.loki.limits_config.otlp_config.resource_attributes.attributes_config[0].attributes[0] | string | `"exporter"` |  |
 | loki.loki.memberlist | string | `"loki-memberlist"` |  |
 | loki.loki.rulerConfig.storage.type | string | `"local"` |  |
 | loki.loki.storage.type | string | `"filesystem"` |  |
-| loki.monitoring.lokiCanary.enabled | bool | `false` |  |
+| loki.loki.useTestSchema | bool | `true` |  |
+| loki.lokiCanary.enabled | bool | `false` |  |
 | loki.monitoring.selfMonitoring.enabled | bool | `false` |  |
 | loki.monitoring.selfMonitoring.grafanaAgent.installOperator | bool | `false` |  |
 | loki.read.replicas | int | `0` |  |
+| loki.resultsCache.enabled | bool | `false` |  |
+| loki.singleBinary.extraArgs[0] | string | `"-config.expand-env=true"` |  |
+| loki.singleBinary.extraEnv[0].name | string | `"INSTANCE_ADDR"` |  |
+| loki.singleBinary.extraEnv[0].valueFrom.fieldRef.fieldPath | string | `"status.podIP"` |  |
 | loki.singleBinary.replicas | int | `1` |  |
 | loki.test.enabled | bool | `false` |  |
 | loki.write.replicas | int | `0` |  |
 | opentelemetry-collector.config.exporters.debug.verbosity | string | `"detailed"` |  |
-| opentelemetry-collector.config.exporters.loki.endpoint | string | `"http://loki.monitoring.svc:3100/loki/api/v1/push"` |  |
 | opentelemetry-collector.config.exporters.otlp.endpoint | string | `"tempo.monitoring.svc:4317"` |  |
 | opentelemetry-collector.config.exporters.otlp.tls.insecure | bool | `true` |  |
-| opentelemetry-collector.config.exporters.prometheus.endpoint | string | `"[${env:MY_POD_IP}]:19001"` |  |
+| opentelemetry-collector.config.exporters.otlphttp/loki.endpoint | string | `"http://loki.monitoring.svc:3100/otlp"` |  |
+| opentelemetry-collector.config.exporters.prometheus.endpoint | string | `":19001"` |  |
 | opentelemetry-collector.config.extensions.health_check.endpoint | string | `"[${env:MY_POD_IP}]:13133"` |  |
-| opentelemetry-collector.config.processors.attributes.actions[0].action | string | `"insert"` |  |
-| opentelemetry-collector.config.processors.attributes.actions[0].key | string | `"loki.attribute.labels"` |  |
-| opentelemetry-collector.config.processors.attributes.actions[0].value | string | `"k8s.pod.name, k8s.namespace.name"` |  |
+| opentelemetry-collector.config.processors.transform/loki.log_statements[0].context | string | `"log"` |  |
+| opentelemetry-collector.config.processors.transform/loki.log_statements[0].statements[0] | string | `"set(resource.attributes[\"exporter\"], \"OTLP\")"` |  |
+| opentelemetry-collector.config.processors.transform/loki.log_statements[0].statements[1] | string | `"set(resource.attributes[\"k8s.namespace.name\"], log.attributes[\"k8s.namespace.name\"])"` |  |
+| opentelemetry-collector.config.processors.transform/loki.log_statements[0].statements[2] | string | `"delete_key(log.attributes, \"k8s.namespace.name\")"` |  |
 | opentelemetry-collector.config.receivers.datadog.endpoint | string | `"[${env:MY_POD_IP}]:8126"` |  |
 | opentelemetry-collector.config.receivers.envoyals.endpoint | string | `"[${env:MY_POD_IP}]:9000"` |  |
 | opentelemetry-collector.config.receivers.jaeger.protocols.grpc.endpoint | string | `"[${env:MY_POD_IP}]:14250"` |  |
@@ -130,8 +155,8 @@ helm uninstall eg-addons -n monitoring
 | opentelemetry-collector.config.receivers.prometheus.config.scrape_configs[0].static_configs[0].targets[0] | string | `"[${env:MY_POD_IP}]:8888"` |  |
 | opentelemetry-collector.config.receivers.zipkin.endpoint | string | `"[${env:MY_POD_IP}]:9411"` |  |
 | opentelemetry-collector.config.service.extensions[0] | string | `"health_check"` |  |
-| opentelemetry-collector.config.service.pipelines.logs.exporters[0] | string | `"loki"` |  |
-| opentelemetry-collector.config.service.pipelines.logs.processors[0] | string | `"attributes"` |  |
+| opentelemetry-collector.config.service.pipelines.logs.exporters[0] | string | `"otlphttp/loki"` |  |
+| opentelemetry-collector.config.service.pipelines.logs.processors[0] | string | `"transform/loki"` |  |
 | opentelemetry-collector.config.service.pipelines.logs.receivers[0] | string | `"otlp"` |  |
 | opentelemetry-collector.config.service.pipelines.logs.receivers[1] | string | `"envoyals"` |  |
 | opentelemetry-collector.config.service.pipelines.metrics.exporters[0] | string | `"prometheus"` |  |
@@ -141,14 +166,13 @@ helm uninstall eg-addons -n monitoring
 | opentelemetry-collector.config.service.pipelines.traces.receivers[0] | string | `"datadog"` |  |
 | opentelemetry-collector.config.service.pipelines.traces.receivers[1] | string | `"otlp"` |  |
 | opentelemetry-collector.config.service.pipelines.traces.receivers[2] | string | `"zipkin"` |  |
-| opentelemetry-collector.config.service.telemetry.metrics.address | string | `nil` |  |
 | opentelemetry-collector.config.service.telemetry.metrics.level | string | `"none"` |  |
 | opentelemetry-collector.config.service.telemetry.metrics.readers[0].pull.exporter.prometheus.host | string | `"localhost"` |  |
 | opentelemetry-collector.config.service.telemetry.metrics.readers[0].pull.exporter.prometheus.port | int | `8888` |  |
 | opentelemetry-collector.enabled | bool | `false` |  |
 | opentelemetry-collector.fullnameOverride | string | `"otel-collector"` |  |
 | opentelemetry-collector.image.repository | string | `"otel/opentelemetry-collector-contrib"` |  |
-| opentelemetry-collector.image.tag | string | `"0.121.0"` |  |
+| opentelemetry-collector.image.tag | string | `"0.155.0"` |  |
 | opentelemetry-collector.mode | string | `"deployment"` |  |
 | opentelemetry-collector.ports.datadog.containerPort | int | `8126` |  |
 | opentelemetry-collector.ports.datadog.enabled | bool | `true` |  |
@@ -161,6 +185,7 @@ helm uninstall eg-addons -n monitoring
 | opentelemetry-collector.ports.envoy-als.hostPort | int | `9000` |  |
 | opentelemetry-collector.ports.envoy-als.protocol | string | `"TCP"` |  |
 | opentelemetry-collector.ports.envoy-als.servicePort | int | `9000` |  |
+| opentelemetry-collector.presets.kubernetesAttributes.enabled | bool | `true` |  |
 | prometheus.alertmanager.enabled | bool | `false` |  |
 | prometheus.enabled | bool | `true` |  |
 | prometheus.kube-state-metrics.customResourceState.config.kind | string | `"CustomResourceStateMetrics"` |  |
@@ -436,7 +461,7 @@ helm uninstall eg-addons -n monitoring
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[4].metrics[4].name | string | `"status_parent_info"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[5].groupVersionKind.group | string | `"gateway.networking.k8s.io"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[5].groupVersionKind.kind | string | `"TLSRoute"` |  |
-| prometheus.kube-state-metrics.customResourceState.config.spec.resources[5].groupVersionKind.version | string | `"v1alpha2"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[5].groupVersionKind.version | string | `"v1"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[5].labelsFromPath.name[0] | string | `"metadata"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[5].labelsFromPath.name[1] | string | `"name"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[5].labelsFromPath.namespace[0] | string | `"metadata"` |  |
@@ -546,7 +571,7 @@ helm uninstall eg-addons -n monitoring
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[6].metrics[4].name | string | `"status_parent_info"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].groupVersionKind.group | string | `"gateway.networking.k8s.io"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].groupVersionKind.kind | string | `"BackendTLSPolicy"` |  |
-| prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].groupVersionKind.version | string | `"v1alpha3"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].groupVersionKind.version | string | `"v1"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].labelsFromPath.name[0] | string | `"metadata"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].labelsFromPath.name[1] | string | `"name"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].labelsFromPath.namespace[0] | string | `"metadata"` |  |
@@ -576,6 +601,63 @@ helm uninstall eg-addons -n monitoring
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].metrics[3].each.type | string | `"Info"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].metrics[3].help | string | `"Target references that the backendtlspolicy wants to be attached to"` |  |
 | prometheus.kube-state-metrics.customResourceState.config.spec.resources[7].metrics[3].name | string | `"target_info"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].groupVersionKind.group | string | `"gateway.networking.k8s.io"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].groupVersionKind.kind | string | `"ListenerSet"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].groupVersionKind.version | string | `"v1"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].labelsFromPath.name[0] | string | `"metadata"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].labelsFromPath.name[1] | string | `"name"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].labelsFromPath.namespace[0] | string | `"metadata"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].labelsFromPath.namespace[1] | string | `"namespace"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metricNamePrefix | string | `"gatewayapi_listenerset"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[0].each.info.labelsFromPath.*[0] | string | `"labels"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[0].each.info.path[0] | string | `"metadata"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[0].each.type | string | `"Info"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[0].help | string | `"Kubernetes labels converted to Prometheus labels."` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[0].name | string | `"labels"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[1].each.gauge.path[0] | string | `"metadata"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[1].each.gauge.path[1] | string | `"creationTimestamp"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[1].each.type | string | `"Gauge"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[1].help | string | `"created timestamp"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[1].name | string | `"created"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[2].each.gauge.path[0] | string | `"metadata"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[2].each.gauge.path[1] | string | `"deletionTimestamp"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[2].each.type | string | `"Gauge"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[2].help | string | `"deletion timestamp"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[2].name | string | `"deleted"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[3].each.info.labelsFromPath.parent_name[0] | string | `"spec"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[3].each.info.labelsFromPath.parent_name[1] | string | `"parentRef"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[3].each.info.labelsFromPath.parent_name[2] | string | `"name"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[3].each.type | string | `"Info"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[3].help | string | `"ListenerSet information"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[3].name | string | `"info"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.allowed_routes_namespaces_from[0] | string | `"allowedRoutes"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.allowed_routes_namespaces_from[1] | string | `"namespaces"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.allowed_routes_namespaces_from[2] | string | `"from"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.hostname[0] | string | `"hostname"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.listener_name[0] | string | `"name"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.port[0] | string | `"port"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.protocol[0] | string | `"protocol"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.tls_mode[0] | string | `"tls"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.labelsFromPath.tls_mode[1] | string | `"mode"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.path[0] | string | `"spec"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.info.path[1] | string | `"listeners"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].each.type | string | `"Info"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].help | string | `"ListenerSet listener information"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[4].name | string | `"listener_info"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[5].each.gauge.labelsFromPath.type[0] | string | `"type"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[5].each.gauge.path[0] | string | `"status"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[5].each.gauge.path[1] | string | `"conditions"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[5].each.gauge.valueFrom[0] | string | `"status"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[5].each.type | string | `"Gauge"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[5].help | string | `"status condition"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[5].name | string | `"status"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[6].each.gauge.labelsFromPath.listener_name[0] | string | `"name"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[6].each.gauge.path[0] | string | `"status"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[6].each.gauge.path[1] | string | `"listeners"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[6].each.gauge.valueFrom[0] | string | `"attachedRoutes"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[6].each.type | string | `"Gauge"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[6].help | string | `"Number of attached routes for a listener"` |  |
+| prometheus.kube-state-metrics.customResourceState.config.spec.resources[8].metrics[6].name | string | `"status_listener_attached_routes"` |  |
 | prometheus.kube-state-metrics.customResourceState.enabled | bool | `true` |  |
 | prometheus.kube-state-metrics.enabled | bool | `false` |  |
 | prometheus.kube-state-metrics.rbac.extraRules[0].apiGroups[0] | string | `"gateway.networking.k8s.io"` |  |
@@ -587,6 +669,7 @@ helm uninstall eg-addons -n monitoring
 | prometheus.kube-state-metrics.rbac.extraRules[0].resources[5] | string | `"tlsroutes"` |  |
 | prometheus.kube-state-metrics.rbac.extraRules[0].resources[6] | string | `"udproutes"` |  |
 | prometheus.kube-state-metrics.rbac.extraRules[0].resources[7] | string | `"backendtlspolicies"` |  |
+| prometheus.kube-state-metrics.rbac.extraRules[0].resources[8] | string | `"listenersets"` |  |
 | prometheus.kube-state-metrics.rbac.extraRules[0].verbs[0] | string | `"list"` |  |
 | prometheus.kube-state-metrics.rbac.extraRules[0].verbs[1] | string | `"watch"` |  |
 | prometheus.prometheus-node-exporter.enabled | bool | `false` |  |

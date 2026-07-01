@@ -11,7 +11,6 @@ import (
 	"os"
 	"sort"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,7 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/utils/ptr"
+	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 	"sigs.k8s.io/yaml"
 
 	egv1a1 "github.com/envoyproxy/gateway/api/v1alpha1"
@@ -112,7 +111,7 @@ func newTestInfraWithCustomServiceAccount(gwNN types.NamespacedName) *ir.Infra {
 	i.Proxy.Config.Spec.Provider = egv1a1.DefaultEnvoyProxyProvider()
 	i.Proxy.Config.Spec.Provider.Kubernetes = &egv1a1.EnvoyProxyKubernetesProvider{
 		EnvoyServiceAccount: &egv1a1.KubernetesServiceAccountSpec{
-			Name: ptr.To("custom-sa"),
+			Name: new("custom-sa"),
 		},
 	}
 
@@ -133,7 +132,7 @@ func newTestIPv6Infra() *ir.Infra {
 	i := newTestInfra()
 	i.Proxy.Config = &egv1a1.EnvoyProxy{
 		Spec: egv1a1.EnvoyProxySpec{
-			IPFamily: ptr.To(egv1a1.IPv6),
+			IPFamily: new(egv1a1.IPv6),
 		},
 	}
 	return i
@@ -143,7 +142,7 @@ func newTestDualStackInfra() *ir.Infra {
 	i := newTestInfra()
 	i.Proxy.Config = &egv1a1.EnvoyProxy{
 		Spec: egv1a1.EnvoyProxySpec{
-			IPFamily: ptr.To(egv1a1.DualStack),
+			IPFamily: new(egv1a1.DualStack),
 		},
 	}
 	return i
@@ -194,7 +193,7 @@ func newTestInfraWithAnnotationsAndLabels(annotations, labels map[string]string)
 }
 
 func TestDeployment(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -219,7 +218,7 @@ func TestDeployment(t *testing.T) {
 			caseName: "custom",
 			infra:    newTestInfra(),
 			deploy: &egv1a1.KubernetesDeploymentSpec{
-				Replicas: ptr.To[int32](2),
+				Replicas: new(int32(2)),
 				Strategy: egv1a1.DefaultKubernetesDeploymentStrategy(),
 				Pod: &egv1a1.KubernetesPodSpec{
 					Annotations: map[string]string{
@@ -229,11 +228,11 @@ func TestDeployment(t *testing.T) {
 						"foo.bar": "custom-label",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 				},
 				Container: &egv1a1.KubernetesContainerSpec{
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -245,7 +244,7 @@ func TestDeployment(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 				},
 			},
@@ -255,7 +254,7 @@ func TestDeployment(t *testing.T) {
 			infra:    newTestInfra(),
 			deploy: &egv1a1.KubernetesDeploymentSpec{
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.StrategicMerge),
+					Type: new(egv1a1.StrategicMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte("{\"spec\":{\"template\":{\"spec\":{\"hostNetwork\":true,\"dnsPolicy\":\"ClusterFirstWithHostNet\"}}}}"),
 					},
@@ -267,7 +266,7 @@ func TestDeployment(t *testing.T) {
 			infra:    newTestInfra(),
 			deploy: &egv1a1.KubernetesDeploymentSpec{
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.StrategicMerge),
+					Type: new(egv1a1.StrategicMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte(`{
 							"spec":{
@@ -293,15 +292,11 @@ func TestDeployment(t *testing.T) {
 				},
 			},
 			shutdown: &egv1a1.ShutdownConfig{
-				DrainTimeout: &metav1.Duration{
-					Duration: 30 * time.Second,
-				},
-				MinDrainDuration: &metav1.Duration{
-					Duration: 15 * time.Second,
-				},
+				DrainTimeout:     new(gwapiv1.Duration("30s")),
+				MinDrainDuration: new(gwapiv1.Duration("15s")),
 			},
 			shutdownManager: &egv1a1.ShutdownManager{
-				Image: ptr.To("privaterepo/envoyproxy/gateway-dev:v1.2.3"),
+				Image: new("privaterepo/envoyproxy/gateway-dev:v1.2.3"),
 			},
 		},
 		{
@@ -324,14 +319,14 @@ func TestDeployment(t *testing.T) {
 			caseName: "extension-env",
 			infra:    newTestInfra(),
 			deploy: &egv1a1.KubernetesDeploymentSpec{
-				Replicas: ptr.To[int32](2),
+				Replicas: new(int32(2)),
 				Strategy: egv1a1.DefaultKubernetesDeploymentStrategy(),
 				Pod: &egv1a1.KubernetesPodSpec{
 					Annotations: map[string]string{
 						"prometheus.io/scrape": "true",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 				},
 				Container: &egv1a1.KubernetesContainerSpec{
@@ -345,7 +340,7 @@ func TestDeployment(t *testing.T) {
 							Value: "env_b_value",
 						},
 					},
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -357,7 +352,7 @@ func TestDeployment(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 				},
 			},
@@ -366,19 +361,19 @@ func TestDeployment(t *testing.T) {
 			caseName: "default-env",
 			infra:    newTestInfra(),
 			deploy: &egv1a1.KubernetesDeploymentSpec{
-				Replicas: ptr.To[int32](2),
+				Replicas: new(int32(2)),
 				Strategy: egv1a1.DefaultKubernetesDeploymentStrategy(),
 				Pod: &egv1a1.KubernetesPodSpec{
 					Annotations: map[string]string{
 						"prometheus.io/scrape": "true",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 				},
 				Container: &egv1a1.KubernetesContainerSpec{
 					Env:   nil,
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -390,7 +385,7 @@ func TestDeployment(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 				},
 			},
@@ -399,22 +394,23 @@ func TestDeployment(t *testing.T) {
 			caseName: "volumes",
 			infra:    newTestInfra(),
 			deploy: &egv1a1.KubernetesDeploymentSpec{
-				Replicas: ptr.To[int32](2),
+				Replicas: new(int32(2)),
 				Strategy: egv1a1.DefaultKubernetesDeploymentStrategy(),
 				Pod: &egv1a1.KubernetesPodSpec{
 					Annotations: map[string]string{
 						"prometheus.io/scrape": "true",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 					Volumes: []corev1.Volume{
 						{
 							Name: "certs",
 							VolumeSource: corev1.VolumeSource{
+								// #nosec G101 - This is a test secret name, not a credential
 								Secret: &corev1.SecretVolumeSource{
 									SecretName:  "custom-envoy-cert",
-									DefaultMode: ptr.To[int32](420),
+									DefaultMode: new(int32(420)),
 								},
 							},
 						},
@@ -431,7 +427,7 @@ func TestDeployment(t *testing.T) {
 							Value: "env_b_value",
 						},
 					},
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -443,7 +439,7 @@ func TestDeployment(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 				},
 			},
@@ -493,14 +489,14 @@ func TestDeployment(t *testing.T) {
 			caseName:    "with-concurrency",
 			infra:       newTestInfra(),
 			deploy:      nil,
-			concurrency: ptr.To[int32](4),
+			concurrency: new(int32(4)),
 			bootstrap:   `test bootstrap config`,
 		},
 		{
 			caseName: "custom_with_initcontainers",
 			infra:    newTestInfra(),
 			deploy: &egv1a1.KubernetesDeploymentSpec{
-				Replicas: ptr.To[int32](3),
+				Replicas: new(int32(3)),
 				Strategy: egv1a1.DefaultKubernetesDeploymentStrategy(),
 				Pod: &egv1a1.KubernetesPodSpec{
 					Annotations: map[string]string{
@@ -510,7 +506,7 @@ func TestDeployment(t *testing.T) {
 						"foo.bar": "custom-label",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 					Volumes: []corev1.Volume{
 						{
@@ -522,7 +518,7 @@ func TestDeployment(t *testing.T) {
 					},
 				},
 				Container: &egv1a1.KubernetesContainerSpec{
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -534,7 +530,7 @@ func TestDeployment(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 					VolumeMounts: []corev1.VolumeMount{
 						{
@@ -635,9 +631,18 @@ func TestDeployment(t *testing.T) {
 			},
 		},
 		{
+			caseName: "with-priority-class-name",
+			infra:    newTestInfra(),
+			deploy: &egv1a1.KubernetesDeploymentSpec{
+				Pod: &egv1a1.KubernetesPodSpec{
+					PriorityClassName: new("high-priority"),
+				},
+			},
+		},
+		{
 			caseName:  "with-extra-args",
 			infra:     newTestInfra(),
-			extraArgs: []string{"--key1 val1", "--key2 val2"},
+			extraArgs: []string{"--key1", "val1", "--key2", "val2"},
 		},
 		{
 			caseName: "with-empty-memory-limits",
@@ -656,7 +661,7 @@ func TestDeployment(t *testing.T) {
 			caseName: "with-name",
 			infra:    newTestInfra(),
 			deploy: &egv1a1.KubernetesDeploymentSpec{
-				Name: ptr.To("custom-deployment-name"),
+				Name: new("custom-deployment-name"),
 			},
 		},
 		{
@@ -720,7 +725,7 @@ func TestDeployment(t *testing.T) {
 					Type: egv1a1.ProviderTypeKubernetes,
 					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
 						Deploy: &egv1a1.KubernetesDeployMode{
-							Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+							Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 						},
 					},
 				}
@@ -767,7 +772,7 @@ func loadDeployment(caseName string) (*appsv1.Deployment, error) {
 }
 
 func TestDaemonSet(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -800,11 +805,11 @@ func TestDaemonSet(t *testing.T) {
 						"foo.bar": "custom-label",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 				},
 				Container: &egv1a1.KubernetesContainerSpec{
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -816,7 +821,7 @@ func TestDaemonSet(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 				},
 			},
@@ -826,7 +831,7 @@ func TestDaemonSet(t *testing.T) {
 			infra:    newTestInfra(),
 			daemonset: &egv1a1.KubernetesDaemonSetSpec{
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.StrategicMerge),
+					Type: new(egv1a1.StrategicMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte("{\"spec\":{\"template\":{\"spec\":{\"hostNetwork\":true,\"dnsPolicy\":\"ClusterFirstWithHostNet\"}}}}"),
 					},
@@ -838,7 +843,7 @@ func TestDaemonSet(t *testing.T) {
 			infra:    newTestInfra(),
 			daemonset: &egv1a1.KubernetesDaemonSetSpec{
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.StrategicMerge),
+					Type: new(egv1a1.StrategicMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte(`{
 							"spec":{
@@ -865,12 +870,8 @@ func TestDaemonSet(t *testing.T) {
 				},
 			},
 			shutdown: &egv1a1.ShutdownConfig{
-				DrainTimeout: &metav1.Duration{
-					Duration: 30 * time.Second,
-				},
-				MinDrainDuration: &metav1.Duration{
-					Duration: 15 * time.Second,
-				},
+				DrainTimeout:     new(gwapiv1.Duration("30s")),
+				MinDrainDuration: new(gwapiv1.Duration("15s")),
 			},
 		},
 		{
@@ -883,7 +884,7 @@ func TestDaemonSet(t *testing.T) {
 						"prometheus.io/scrape": "true",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 				},
 				Container: &egv1a1.KubernetesContainerSpec{
@@ -897,7 +898,7 @@ func TestDaemonSet(t *testing.T) {
 							Value: "env_b_value",
 						},
 					},
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -909,7 +910,7 @@ func TestDaemonSet(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 				},
 			},
@@ -924,12 +925,12 @@ func TestDaemonSet(t *testing.T) {
 						"prometheus.io/scrape": "true",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 				},
 				Container: &egv1a1.KubernetesContainerSpec{
 					Env:   nil,
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -941,7 +942,7 @@ func TestDaemonSet(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 				},
 			},
@@ -956,15 +957,16 @@ func TestDaemonSet(t *testing.T) {
 						"prometheus.io/scrape": "true",
 					},
 					SecurityContext: &corev1.PodSecurityContext{
-						RunAsUser: ptr.To[int64](1000),
+						RunAsUser: new(int64(1000)),
 					},
 					Volumes: []corev1.Volume{
 						{
 							Name: "certs",
 							VolumeSource: corev1.VolumeSource{
+								// #nosec G101 - This is a test secret name, not a credential
 								Secret: &corev1.SecretVolumeSource{
 									SecretName:  "custom-envoy-cert",
-									DefaultMode: ptr.To[int32](420),
+									DefaultMode: new(int32(420)),
 								},
 							},
 						},
@@ -981,7 +983,7 @@ func TestDaemonSet(t *testing.T) {
 							Value: "env_b_value",
 						},
 					},
-					Image: ptr.To("envoyproxy/envoy:v1.2.3"),
+					Image: new("envoyproxy/envoy:v1.2.3"),
 					Resources: &corev1.ResourceRequirements{
 						Limits: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("400m"),
@@ -993,7 +995,7 @@ func TestDaemonSet(t *testing.T) {
 						},
 					},
 					SecurityContext: &corev1.SecurityContext{
-						Privileged: ptr.To(true),
+						Privileged: new(true),
 					},
 				},
 			},
@@ -1041,7 +1043,7 @@ func TestDaemonSet(t *testing.T) {
 			caseName:    "with-concurrency",
 			infra:       newTestInfra(),
 			daemonset:   nil,
-			concurrency: ptr.To[int32](4),
+			concurrency: new(int32(4)),
 			bootstrap:   `test bootstrap config`,
 		},
 		{
@@ -1120,20 +1122,35 @@ func TestDaemonSet(t *testing.T) {
 			},
 		},
 		{
+			caseName: "with-priority-class-name",
+			infra:    newTestInfra(),
+			daemonset: &egv1a1.KubernetesDaemonSetSpec{
+				Pod: &egv1a1.KubernetesPodSpec{
+					PriorityClassName: new("high-priority"),
+				},
+			},
+		},
+		{
 			caseName:  "with-extra-args",
 			infra:     newTestInfra(),
-			extraArgs: []string{"--key1 val1", "--key2 val2"},
+			extraArgs: []string{"--key1", "val1", "--key2", "val2"},
 		},
 		{
 			caseName: "with-name",
 			infra:    newTestInfra(),
 			daemonset: &egv1a1.KubernetesDaemonSetSpec{
-				Name: ptr.To("custom-daemonset-name"),
+				Name: new("custom-daemonset-name"),
 			},
 		},
 		{
 			caseName:             "gateway-namespace-mode",
 			infra:                newTestInfraWithNamespacedName(types.NamespacedName{Namespace: "ns1", Name: "gateway-1"}),
+			daemonset:            nil,
+			gatewayNamespaceMode: true,
+		},
+		{
+			caseName:             "custom-sa",
+			infra:                newTestInfraWithCustomServiceAccount(types.NamespacedName{Namespace: "ns1", Name: "gateway-1"}),
 			daemonset:            nil,
 			gatewayNamespaceMode: true,
 		},
@@ -1145,7 +1162,7 @@ func TestDaemonSet(t *testing.T) {
 					Type: egv1a1.ProviderTypeKubernetes,
 					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
 						Deploy: &egv1a1.KubernetesDeployMode{
-							Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+							Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 						},
 					},
 				}
@@ -1234,7 +1251,7 @@ func loadDaemonSet(caseName string) (*appsv1.DaemonSet, error) {
 }
 
 func TestService(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	svcType := egv1a1.ServiceTypeClusterIP
@@ -1323,7 +1340,7 @@ func TestService(t *testing.T) {
 			infra:    newTestInfra(),
 			service: &egv1a1.KubernetesServiceSpec{
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.StrategicMerge),
+					Type: new(egv1a1.StrategicMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte("{\"metadata\":{\"name\":\"foo\"}}"),
 					},
@@ -1334,22 +1351,22 @@ func TestService(t *testing.T) {
 			caseName: "with-name",
 			infra:    newTestInfra(),
 			service: &egv1a1.KubernetesServiceSpec{
-				Name: ptr.To("custom-service-name"),
+				Name: new("custom-service-name"),
 			},
 		},
 		{
 			caseName: "dualstack",
-			infra:    newTestInfraWithIPFamily(ptr.To(egv1a1.DualStack)),
+			infra:    newTestInfraWithIPFamily(new(egv1a1.DualStack)),
 			service:  nil,
 		},
 		{
 			caseName: "ipv4-singlestack",
-			infra:    newTestInfraWithIPFamily(ptr.To(egv1a1.IPv4)),
+			infra:    newTestInfraWithIPFamily(new(egv1a1.IPv4)),
 			service:  nil,
 		},
 		{
 			caseName: "ipv6-singlestack",
-			infra:    newTestInfraWithIPFamily(ptr.To(egv1a1.IPv6)),
+			infra:    newTestInfraWithIPFamily(new(egv1a1.IPv6)),
 			service:  nil,
 		},
 		{
@@ -1366,7 +1383,7 @@ func TestService(t *testing.T) {
 					Type: egv1a1.ProviderTypeKubernetes,
 					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
 						Deploy: &egv1a1.KubernetesDeployMode{
-							Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+							Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 						},
 					},
 				}
@@ -1409,7 +1426,7 @@ func loadService(caseName string) (*corev1.Service, error) {
 }
 
 func TestConfigMap(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 	cases := []struct {
 		name                 string
@@ -1441,7 +1458,7 @@ func TestConfigMap(t *testing.T) {
 					Type: egv1a1.ProviderTypeKubernetes,
 					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
 						Deploy: &egv1a1.KubernetesDeployMode{
-							Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+							Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 						},
 					},
 				}
@@ -1477,7 +1494,7 @@ func loadConfigmap(tc string) (*corev1.ConfigMap, error) {
 }
 
 func TestServiceAccount(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 	cases := []struct {
 		name                 string
@@ -1514,7 +1531,7 @@ func TestServiceAccount(t *testing.T) {
 					Type: egv1a1.ProviderTypeKubernetes,
 					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
 						Deploy: &egv1a1.KubernetesDeployMode{
-							Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+							Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 						},
 					},
 				}
@@ -1551,7 +1568,7 @@ func loadServiceAccount(tc string) (*corev1.ServiceAccount, error) {
 }
 
 func TestPDB(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -1565,16 +1582,16 @@ func TestPDB(t *testing.T) {
 			caseName: "default",
 			infra:    newTestInfra(),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
-				MinAvailable: ptr.To(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
+				MinAvailable: new(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
 			},
 		},
 		{
 			caseName: "patch-json-pdb",
 			infra:    newTestInfra(),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
-				MinAvailable: ptr.To(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
+				MinAvailable: new(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.JSONMerge),
+					Type: new(egv1a1.JSONMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte("{\"metadata\":{\"name\":\"foo\"}, \"spec\": {\"selector\": {\"matchLabels\": {\"app\": \"bar\"}}}}"),
 					},
@@ -1585,9 +1602,9 @@ func TestPDB(t *testing.T) {
 			caseName: "patch-strategic-pdb",
 			infra:    newTestInfra(),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
-				MinAvailable: ptr.To(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
+				MinAvailable: new(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.StrategicMerge),
+					Type: new(egv1a1.StrategicMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte("{\"metadata\":{\"name\":\"foo\"}, \"spec\": {\"selector\": {\"matchLabels\": {\"app\": \"bar\"}}}}"),
 					},
@@ -1598,21 +1615,21 @@ func TestPDB(t *testing.T) {
 			caseName: "max-unavailable",
 			infra:    newTestInfra(),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
-				MaxUnavailable: ptr.To(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
+				MaxUnavailable: new(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
 			},
 		},
 		{
 			caseName: "max-unavailable-percent",
 			infra:    newTestInfra(),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
-				MaxUnavailable: ptr.To(intstr.IntOrString{Type: intstr.String, StrVal: "20%"}),
+				MaxUnavailable: new(intstr.IntOrString{Type: intstr.String, StrVal: "20%"}),
 			},
 		},
 		{
 			caseName: "min-available-percent",
 			infra:    newTestInfra(),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
-				MinAvailable: ptr.To(intstr.IntOrString{Type: intstr.String, StrVal: "20%"}),
+				MinAvailable: new(intstr.IntOrString{Type: intstr.String, StrVal: "20%"}),
 			},
 		},
 		{
@@ -1620,7 +1637,7 @@ func TestPDB(t *testing.T) {
 			infra:    newTestInfra(),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.StrategicMerge),
+					Type: new(egv1a1.StrategicMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte("{\"metadata\":{\"name\":\"foo\"}, \"spec\": {\"minAvailable\": 1, \"selector\": {\"matchLabels\": {\"app\": \"bar\"}}}}"),
 					},
@@ -1631,15 +1648,15 @@ func TestPDB(t *testing.T) {
 			caseName: "with-name",
 			infra:    newTestInfra(),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
-				MinAvailable: ptr.To(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
-				Name:         ptr.To("custom-pdb-name"),
+				MinAvailable: new(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
+				Name:         new("custom-pdb-name"),
 			},
 		},
 		{
 			caseName: "gateway-namespace-mode",
 			infra:    newTestInfraWithNamespacedName(types.NamespacedName{Namespace: "ns1", Name: "gateway-1"}),
 			pdb: &egv1a1.KubernetesPodDisruptionBudgetSpec{
-				MinAvailable: ptr.To(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
+				MinAvailable: new(intstr.IntOrString{Type: intstr.Int, IntVal: 1}),
 			},
 			gatewayNamespaceMode: true,
 		},
@@ -1652,7 +1669,7 @@ func TestPDB(t *testing.T) {
 					Type: egv1a1.ProviderTypeKubernetes,
 					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
 						Deploy: &egv1a1.KubernetesDeployMode{
-							Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+							Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 						},
 					},
 				}
@@ -1693,7 +1710,7 @@ func TestPDB(t *testing.T) {
 }
 
 func TestHorizontalPodAutoscaler(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -1707,22 +1724,22 @@ func TestHorizontalPodAutoscaler(t *testing.T) {
 			caseName: "default",
 			infra:    newTestInfra(),
 			hpa: &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-				MaxReplicas: ptr.To[int32](1),
+				MaxReplicas: new(int32(1)),
 			},
 		},
 		{
 			caseName: "custom",
 			infra:    newTestInfra(),
 			hpa: &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-				MinReplicas: ptr.To[int32](5),
-				MaxReplicas: ptr.To[int32](10),
+				MinReplicas: new(int32(5)),
+				MaxReplicas: new(int32(10)),
 				Metrics: []autoscalingv2.MetricSpec{
 					{
 						Resource: &autoscalingv2.ResourceMetricSource{
 							Name: corev1.ResourceCPU,
 							Target: autoscalingv2.MetricTarget{
 								Type:               autoscalingv2.UtilizationMetricType,
-								AverageUtilization: ptr.To[int32](60),
+								AverageUtilization: new(int32(60)),
 							},
 						},
 						Type: autoscalingv2.ResourceMetricSourceType,
@@ -1732,7 +1749,7 @@ func TestHorizontalPodAutoscaler(t *testing.T) {
 							Name: corev1.ResourceMemory,
 							Target: autoscalingv2.MetricTarget{
 								Type:               autoscalingv2.UtilizationMetricType,
-								AverageUtilization: ptr.To[int32](70),
+								AverageUtilization: new(int32(70)),
 							},
 						},
 						Type: autoscalingv2.ResourceMetricSourceType,
@@ -1744,9 +1761,9 @@ func TestHorizontalPodAutoscaler(t *testing.T) {
 			caseName: "patch-json-hpa",
 			infra:    newTestInfra(),
 			hpa: &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-				MaxReplicas: ptr.To[int32](1),
+				MaxReplicas: new(int32(1)),
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.JSONMerge),
+					Type: new(egv1a1.JSONMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte("{\"metadata\":{\"name\":\"foo\"}, \"spec\": {\"scaleTargetRef\": {\"name\": \"bar\"}}}"),
 					},
@@ -1757,9 +1774,9 @@ func TestHorizontalPodAutoscaler(t *testing.T) {
 			caseName: "patch-strategic-hpa",
 			infra:    newTestInfra(),
 			hpa: &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-				MaxReplicas: ptr.To[int32](1),
+				MaxReplicas: new(int32(1)),
 				Patch: &egv1a1.KubernetesPatchSpec{
-					Type: ptr.To(egv1a1.StrategicMerge),
+					Type: new(egv1a1.StrategicMerge),
 					Value: apiextensionsv1.JSON{
 						Raw: []byte("{\"metadata\":{\"name\":\"foo\"}, \"spec\": {\"metrics\": [{\"resource\": {\"name\": \"cpu\", \"target\": {\"averageUtilization\": 50, \"type\": \"Utilization\"}}, \"type\": \"Resource\"}]}}"),
 					},
@@ -1770,26 +1787,26 @@ func TestHorizontalPodAutoscaler(t *testing.T) {
 			caseName: "with-deployment-name",
 			infra:    newTestInfra(),
 			hpa: &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-				MinReplicas: ptr.To[int32](5),
-				MaxReplicas: ptr.To[int32](10),
+				MinReplicas: new(int32(5)),
+				MaxReplicas: new(int32(10)),
 			},
 			deploy: &egv1a1.KubernetesDeploymentSpec{
-				Name: ptr.To("custom-deployment-name"),
+				Name: new("custom-deployment-name"),
 			},
 		},
 		{
 			caseName: "with-name",
 			infra:    newTestInfra(),
 			hpa: &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-				MaxReplicas: ptr.To[int32](1),
-				Name:        ptr.To("custom-hpa-name"),
+				MaxReplicas: new(int32(1)),
+				Name:        new("custom-hpa-name"),
 			},
 		},
 		{
 			caseName: "gateway-namespace-mode",
 			infra:    newTestInfraWithNamespacedName(types.NamespacedName{Namespace: "ns1", Name: "gateway-1"}),
 			hpa: &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-				MaxReplicas: ptr.To[int32](1),
+				MaxReplicas: new(int32(1)),
 			},
 			gatewayNamespaceMode: true,
 		},
@@ -1802,7 +1819,7 @@ func TestHorizontalPodAutoscaler(t *testing.T) {
 					Type: egv1a1.ProviderTypeKubernetes,
 					Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
 						Deploy: &egv1a1.KubernetesDeployMode{
-							Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+							Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 						},
 					},
 				}
@@ -1926,21 +1943,21 @@ func TestIPFamilyPresentInSpec(t *testing.T) {
 		},
 		{
 			"ipv4 specified",
-			ptr.To(egv1a1.IPv4),
+			new(egv1a1.IPv4),
 			nil,
 			nil,
 		},
 		{
 			"ipv6 specified",
-			ptr.To(egv1a1.IPv6),
+			new(egv1a1.IPv6),
 			[]corev1.IPFamily{corev1.IPv6Protocol},
-			ptr.To(corev1.IPFamilyPolicySingleStack),
+			new(corev1.IPFamilyPolicySingleStack),
 		},
 		{
 			"dual stack",
-			ptr.To(egv1a1.DualStack),
+			new(egv1a1.DualStack),
 			[]corev1.IPFamily{corev1.IPv4Protocol, corev1.IPv6Protocol},
-			ptr.To(corev1.IPFamilyPolicyRequireDualStack),
+			new(corev1.IPFamilyPolicyRequireDualStack),
 		},
 	}
 
@@ -1957,7 +1974,7 @@ func TestIPFamilyPresentInSpec(t *testing.T) {
 }
 
 func TestGatewayNamespaceModeMultipleResources(t *testing.T) {
-	cfg, err := config.New(os.Stdout)
+	cfg, err := config.New(os.Stdout, os.Stderr)
 	require.NoError(t, err)
 
 	// Configure gateway namespace mode
@@ -1965,13 +1982,12 @@ func TestGatewayNamespaceModeMultipleResources(t *testing.T) {
 		Type: egv1a1.ProviderTypeKubernetes,
 		Kubernetes: &egv1a1.EnvoyGatewayKubernetesProvider{
 			Deploy: &egv1a1.KubernetesDeployMode{
-				Type: ptr.To(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
+				Type: new(egv1a1.KubernetesDeployModeTypeGatewayNamespace),
 			},
 		},
 	}
 
 	// Create test infra with multiple namespaces
-	var infraList []*ir.Infra
 	infra1 := newTestInfraWithNamespacedName(types.NamespacedName{Namespace: "namespace-1", Name: "gateway-1"})
 	// Add HPA config to first infra
 	if infra1.Proxy.Config == nil {
@@ -1980,13 +1996,13 @@ func TestGatewayNamespaceModeMultipleResources(t *testing.T) {
 	if infra1.Proxy.Config.Spec.Provider == nil {
 		infra1.Proxy.Config.Spec.Provider = &egv1a1.EnvoyProxyProvider{}
 	}
-	infra1.Proxy.Config.Spec.Provider.Type = egv1a1.ProviderTypeKubernetes
+	infra1.Proxy.Config.Spec.Provider.Type = egv1a1.EnvoyProxyProviderTypeKubernetes
 	if infra1.Proxy.Config.Spec.Provider.Kubernetes == nil {
 		infra1.Proxy.Config.Spec.Provider.Kubernetes = &egv1a1.EnvoyProxyKubernetesProvider{}
 	}
 	infra1.Proxy.Config.Spec.Provider.Kubernetes.EnvoyHpa = &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-		MinReplicas: ptr.To[int32](1),
-		MaxReplicas: ptr.To[int32](3),
+		MinReplicas: new(int32(1)),
+		MaxReplicas: new(int32(3)),
 	}
 
 	infra2 := newTestInfraWithNamespacedName(types.NamespacedName{Namespace: "namespace-2", Name: "gateway-2"})
@@ -1997,16 +2013,16 @@ func TestGatewayNamespaceModeMultipleResources(t *testing.T) {
 	if infra2.Proxy.Config.Spec.Provider == nil {
 		infra2.Proxy.Config.Spec.Provider = &egv1a1.EnvoyProxyProvider{}
 	}
-	infra2.Proxy.Config.Spec.Provider.Type = egv1a1.ProviderTypeKubernetes
+	infra2.Proxy.Config.Spec.Provider.Type = egv1a1.EnvoyProxyProviderTypeKubernetes
 	if infra2.Proxy.Config.Spec.Provider.Kubernetes == nil {
 		infra2.Proxy.Config.Spec.Provider.Kubernetes = &egv1a1.EnvoyProxyKubernetesProvider{}
 	}
 	infra2.Proxy.Config.Spec.Provider.Kubernetes.EnvoyHpa = &egv1a1.KubernetesHorizontalPodAutoscalerSpec{
-		MinReplicas: ptr.To[int32](1),
-		MaxReplicas: ptr.To[int32](3),
+		MinReplicas: new(int32(1)),
+		MaxReplicas: new(int32(3)),
 	}
 
-	infraList = append(infraList, infra1, infra2)
+	infraList := []*ir.Infra{infra1, infra2}
 
 	deployments := make([]*appsv1.Deployment, 0, len(infraList))
 	services := make([]*corev1.Service, 0, len(infraList))

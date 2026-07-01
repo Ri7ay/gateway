@@ -2,7 +2,7 @@
 title: "Gateway Exported Metrics"
 ---
 
-The Envoy Gateway provides a collection of self-monitoring metrics in [Prometheus format][prom-format]. 
+The Envoy Gateway provides a collection of self-monitoring metrics in [Prometheus format][prom-format].
 
 These metrics allow monitoring of the behavior of Envoy Gateway itself (as distinct from that of the EnvoyProxy it managed).
 
@@ -13,7 +13,7 @@ For EnvoyProxy Metrics, please refer to the [EnvoyProxy Metrics](./proxy-metric)
 ## Watching Components
 
 The Resource Provider, xDS Translator and Infra Manager etc. are key components that made up of Envoy Gateway,
-they all follow the design of [Watching Components](../../../contributions/design/watching).
+they all follow the design of [Watching Components](/community/design/watching).
 
 Envoy Gateway collects the following metrics in Watching Components:
 
@@ -57,11 +57,12 @@ Envoy Gateway monitors the cache and xDS connection status in xDS Server.
 
 Envoy Gateway collects the following metrics in xDS Server:
 
-| Name                          | Description                                            |
-|-------------------------------|--------------------------------------------------------|
-| `xds_snapshot_create_total`   | Total number of xds snapshot cache creates.            |
-| `xds_snapshot_update_total`   | Total number of xds snapshot cache updates by node id. |
-| `xds_stream_duration_seconds` | How long a xds stream takes to finish.                 |
+| Name                          | Description                                                                            |
+|-------------------------------|----------------------------------------------------------------------------------------|
+| `xds_snapshot_create_total`   | Total number of xds snapshot cache creates.                                            |
+| `xds_snapshot_update_total`   | Total number of xds snapshot cache updates by node id.                                 |
+| `xds_stream_duration_seconds` | How long a xds stream takes to finish.                                                 |
+| `xds_nack_total`              | Total number of xds updates rejected (NACKed) by Envoy, by node id and resource type.  |
 
 - For xDS snapshot cache update and xDS stream connection status, each metric includes `nodeID` label to identify the connection peer.
 - For xDS stream connection status, each metric also includes `streamID` label to identify the connection stream, and `isDeltaStream` label to identify the delta connection stream.
@@ -89,7 +90,7 @@ Envoy Gateway monitors the status of Wasm remote fetch cache.
 
 | Name                      | Description                                      |
 |---------------------------|--------------------------------------------------|
-| `wasm_cache_entries`      | Number of Wasm remote fetch cache entries.       | 
+| `wasm_cache_entries`      | Number of Wasm remote fetch cache entries.       |
 | `wasm_cache_lookup_total` | Total number of Wasm remote fetch cache lookups. |
 | `wasm_remote_fetch_total` | Total number of Wasm remote fetches and results. |
 
